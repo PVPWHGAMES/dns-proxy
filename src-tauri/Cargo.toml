@@ -1,0 +1,35 @@
+[package]
+name = "dns-proxy"
+version = "1.0.2"
+description = "Windows全局DNS代理软件"
+authors = ["you"]
+edition = "2021"
+
+[lib]
+name = "dns_proxy_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+trust-dns-server = "0.23"
+trust-dns-client = "0.23"
+trust-dns-proto = "0.23"
+toml = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+dirs = "5"
+regex = "1"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+base64 = "0.22"
+futures = "0.3"
+wintun = "0.4"
+socket2 = "0.5"
