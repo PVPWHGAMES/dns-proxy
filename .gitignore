@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+src-tauri/target/
+*.msi
+*.exe
+!src-tauri/wintun.dll
+
+# Logs
+*.log
+build-log.txt
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Nezha
+.nezha/
+
+# Temp
+*.tmp
+*.bak
