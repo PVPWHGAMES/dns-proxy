@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-config-schema/schema.json",
   "productName": "DNS Proxy",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "identifier": "com.dnsproxy.app",
   "build": {
     "beforeDevCommand": "npm run dev",

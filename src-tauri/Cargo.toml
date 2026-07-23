@@ -1,6 +1,6 @@
 [package]
 name = "dns-proxy"
-version = "1.0.2"
+version = "1.0.3"
 description = "Windows全局DNS代理软件"
 authors = ["you"]
 edition = "2021"
