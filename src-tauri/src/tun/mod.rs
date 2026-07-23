@@ -17,7 +17,7 @@ pub struct TunConfig {
 impl Default for TunConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             interface_name: "DNS-Proxy-TUN".to_string(),
             subnet: "10.10.0.0/24".to_string(),
             gateway: "10.10.0.1".to_string(),
