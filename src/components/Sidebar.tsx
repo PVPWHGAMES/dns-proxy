@@ -8,6 +8,7 @@ import {
   Globe,
   Shield,
   Wifi,
+  Info,
 } from "lucide-react";
 import { api } from "../lib/api";
 
@@ -36,6 +37,11 @@ const navItems = [
     title: "日志查看",
     icon: FileText,
     path: "/logs",
+  },
+  {
+    title: "关于",
+    icon: Info,
+    path: "/about",
   },
 ];
 

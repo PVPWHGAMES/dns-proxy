@@ -5,6 +5,7 @@ import Settings from "./pages/Settings";
 import Rules from "./pages/Rules";
 import Logs from "./pages/Logs";
 import NetworkSettings from "./pages/NetworkSettings";
+import About from "./pages/About";
 
 function App() {
   return (
@@ -16,6 +17,7 @@ function App() {
           <Route path="/network" element={<NetworkSettings />} />
           <Route path="/rules" element={<Rules />} />
           <Route path="/logs" element={<Logs />} />
+          <Route path="/about" element={<About />} />
         </Routes>
       </Layout>
     </Router>
