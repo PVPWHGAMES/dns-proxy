@@ -112,7 +112,7 @@ export default function About() {
               <div className="text-center">
                 <div className="border rounded-lg p-3 bg-white mb-2">
                   <img
-                    src="/alipay.png"
+                    src="/alipay.jpg"
                     alt="支付宝"
                     className="w-full h-auto"
                     onError={(e) => {
@@ -121,7 +121,7 @@ export default function About() {
                       const parent = target.parentElement;
                       if (parent) {
                         parent.innerHTML =
-                          '<div class="flex items-center justify-center h-32 text-muted-foreground text-xs">请将 alipay.png<br/>放入 public 目录</div>';
+                          '<div class="flex items-center justify-center h-32 text-muted-foreground text-xs">请将 alipay.jpg<br/>放入 public 目录</div>';
                       }
                     }}
                   />
