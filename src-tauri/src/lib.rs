@@ -99,6 +99,13 @@ async fn clear_logs(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn clear_cache(state: State<'_, AppState>) -> Result<(), String> {
+    let server = state.server.lock().await;
+    server.clear_cache();
+    Ok(())
+}
+
+#[tauri::command]
 async fn update_subscriptions(state: State<'_, AppState>) -> Result<String, String> {
     let server = state.server.lock().await;
     server.update_subscriptions().await;
@@ -690,6 +697,7 @@ pub fn run() {
             get_stats,
             get_logs,
             clear_logs,
+            clear_cache,
             update_subscriptions,
             get_tun_config,
             save_tun_config,

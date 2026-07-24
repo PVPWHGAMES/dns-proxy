@@ -422,10 +422,10 @@ export default function Rules() {
             <p className="text-xs font-medium mb-2">快速添加预设:</p>
             <div className="space-y-2">
               <div>
-                <p className="text-xs text-muted-foreground mb-1">🏠 国内域名 (→ domestic)</p>
+                <p className="text-xs text-muted-foreground mb-1">🏠 国内域名 (→ 直连)</p>
                 <div className="flex flex-wrap gap-2">
                   {[
-                    { name: "CN 国内直连域名 (11万+)", url: "https://ghfast.top/https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/direct-list.txt", group: "domestic" },
+                    { name: "CN 国内直连域名", url: "https://ghfast.top/https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/direct-list.txt", group: "domestic" },
                     { name: "Apple 中国域名", url: "https://ghfast.top/https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/apple-cn.txt", group: "domestic" },
                     { name: "Google 中国域名", url: "https://ghfast.top/https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/google-cn.txt", group: "domestic" },
                   ].map((preset) => (
@@ -452,10 +452,10 @@ export default function Rules() {
                 </div>
               </div>
               <div>
-                <p className="text-xs text-muted-foreground mb-1">🌐 国外域名 (→ proxy) <span className="text-muted-foreground/70">包含 Google/GitHub/YouTube/Telegram/OpenAI 等全部国外服务</span></p>
+                <p className="text-xs text-muted-foreground mb-1">🌐 国外域名 (→ 代理) <span className="text-muted-foreground/70">包含 Google/GitHub/YouTube/Telegram/OpenAI 等全部国外服务</span></p>
                 <div className="flex flex-wrap gap-2">
                   {[
-                    { name: "Proxy 需代理域名 (2.7万+)", url: "https://ghfast.top/https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/proxy-list.txt", group: "proxy" },
+                    { name: "Proxy 需代理域名", url: "https://ghfast.top/https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/proxy-list.txt", group: "proxy" },
                   ].map((preset) => (
                     <button
                       key={preset.name}
@@ -483,7 +483,7 @@ export default function Rules() {
                 <p className="text-xs text-muted-foreground mb-1">🚫 广告拦截 (→ blocklist)</p>
                 <div className="flex flex-wrap gap-2">
                   {[
-                    { name: "广告拦截域名 (16万+)", url: "https://ghfast.top/https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/reject-list.txt" },
+                    { name: "广告拦截域名", url: "https://ghfast.top/https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/reject-list.txt" },
                   ].map((preset) => (
                     <button
                       key={preset.name}
@@ -526,7 +526,7 @@ export default function Rules() {
                         <span className="font-medium">{sub.name}</span>
                         <span className="text-xs text-muted-foreground bg-muted px-2 py-0.5 rounded">{sub.rules.length} 条</span>
                         {sub.target_group && (
-                          <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded">→ {sub.target_group}</span>
+                          <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded">→ {sub.target_group === "domestic" ? "直连" : sub.target_group === "proxy" ? "代理" : sub.target_group}</span>
                         )}
                       </div>
                       <p className="text-xs text-muted-foreground truncate">{sub.url}</p>

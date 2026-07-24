@@ -259,6 +259,14 @@ impl DnsHandler {
             forward_group = self.check_geosite(&query_name);
         }
 
+        // 仍未命中时，使用默认分组
+        if forward_group.is_none() {
+            let default_group = self.config.lock().unwrap().proxy.default_group.clone();
+            if !default_group.is_empty() {
+                forward_group = Some(default_group);
+            }
+        }
+
         // 根据策略选择DNS服务器并转发（如有指定分组则过滤）
         let (response, server_name) = if let Some(ref group) = forward_group {
             self.forward_with_strategy_for_group(query_bytes, group).await
@@ -701,6 +709,10 @@ impl DnsHandler {
         if let Ok(mut logs) = self.logs.lock() {
             logs.clear();
         }
+    }
+
+    pub fn clear_cache(&self) {
+        self.cache.clear();
     }
 
     pub async fn get_config(&self) -> AppConfig {

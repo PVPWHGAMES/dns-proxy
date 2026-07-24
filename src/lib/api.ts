@@ -28,6 +28,7 @@ export interface ProxyConfig {
   cache_ttl: number;
   auto_start: boolean;
   block_ipv6: boolean;
+  default_group: string;
 }
 
 export interface Rule {
@@ -144,6 +145,10 @@ export const api = {
 
   async clearLogs(): Promise<void> {
     return await invoke("clear_logs");
+  },
+
+  async clearCache(): Promise<void> {
+    return await invoke("clear_cache");
   },
 
   async updateSubscriptions(): Promise<string> {

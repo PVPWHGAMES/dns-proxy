@@ -188,40 +188,40 @@ export default function Logs() {
         </div>
 
         <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
-          <table className="w-full">
+          <table className="w-full table-fixed min-w-[850px]">
             <thead className="sticky top-0 bg-card z-10">
               <tr className="border-b bg-muted/50">
-                <th className="text-left p-3 text-sm font-medium text-muted-foreground">
+                <th className="text-left p-3 text-sm font-medium text-muted-foreground w-[13%]">
                   <div className="flex items-center gap-2">
                     <Clock className="w-4 h-4" />
                     时间
                   </div>
                 </th>
-                <th className="text-left p-3 text-sm font-medium text-muted-foreground">
+                <th className="text-left p-3 text-sm font-medium text-muted-foreground w-[27%]">
                   <div className="flex items-center gap-2">
                     <Globe className="w-4 h-4" />
                     域名
                   </div>
                 </th>
-                <th className="text-left p-3 text-sm font-medium text-muted-foreground">
+                <th className="text-left p-3 text-sm font-medium text-muted-foreground w-[8%]">
                   类型
                 </th>
-                <th className="text-left p-3 text-sm font-medium text-muted-foreground">
+                <th className="text-left p-3 text-sm font-medium text-muted-foreground w-[17%]">
                   响应
                 </th>
-                <th className="text-left p-3 text-sm font-medium text-muted-foreground">
+                <th className="text-left p-3 text-sm font-medium text-muted-foreground w-[13%]">
                   <div className="flex items-center gap-2">
                     <Server className="w-4 h-4" />
                     上游
                   </div>
                 </th>
-                <th className="text-left p-3 text-sm font-medium text-muted-foreground">
+                <th className="text-left p-3 text-sm font-medium text-muted-foreground w-[7%]">
                   分组
                 </th>
-                <th className="text-left p-3 text-sm font-medium text-muted-foreground">
+                <th className="text-left p-3 text-sm font-medium text-muted-foreground w-[7%]">
                   延迟
                 </th>
-                <th className="text-left p-3 text-sm font-medium text-muted-foreground">
+                <th className="text-left p-3 text-sm font-medium text-muted-foreground w-[8%]">
                   状态
                 </th>
               </tr>
@@ -236,30 +236,31 @@ export default function Logs() {
               ) : (
                 filteredLogs.map((log) => (
                   <tr key={log.id} className="border-b hover:bg-muted/50 transition-colors">
-                    <td className="p-3 text-sm font-mono text-muted-foreground">
+                    <td className="p-3 text-sm font-mono text-muted-foreground whitespace-nowrap truncate">
                       {log.timestamp}
                     </td>
-                    <td className="p-3 text-sm font-medium">{log.domain}</td>
-                    <td className="p-3 text-sm">
+                    <td className="p-3 text-sm font-medium">
+                      <div className="truncate">{log.domain}</div>
+                    </td>
+                    <td className="p-3 text-sm whitespace-nowrap">
                       <span className="px-2 py-1 rounded bg-muted text-xs font-mono">
                         {log.query_type}
                       </span>
                     </td>
-                    <td className="p-3 text-sm font-mono">{log.response}</td>
-                    <td className="p-3 text-sm text-muted-foreground">{log.upstream}</td>
-                    <td className="p-3 text-sm">
+                    <td className="p-3 text-sm font-mono truncate">{log.response}</td>
+                    <td className="p-3 text-sm text-muted-foreground truncate">{log.upstream}</td>
+                    <td className="p-3 text-sm whitespace-nowrap">
                       {log.group ? (
                         <span className={`px-2 py-1 rounded text-xs ${
                           log.group === "domestic" ? "bg-blue-100 text-blue-700" :
-                          log.group === "foreign" ? "bg-purple-100 text-purple-700" :
                           log.group === "proxy" ? "bg-orange-100 text-orange-700" :
                           "bg-gray-100 text-gray-700"
                         }`}>
-                          {log.group}
+                          {log.group === "domestic" ? "直连" : log.group === "proxy" ? "代理" : log.group}
                         </span>
                       ) : "-"}
                     </td>
-                    <td className="p-3 text-sm">
+                    <td className="p-3 text-sm whitespace-nowrap">
                       <span
                         className={`font-mono ${
                           log.latency_ms < 10
@@ -272,7 +273,7 @@ export default function Logs() {
                         {log.latency_ms}ms
                       </span>
                     </td>
-                    <td className="p-3 text-sm">
+                    <td className="p-3 text-sm whitespace-nowrap">
                       <span
                         className={`
                           px-2 py-1 rounded-full text-xs font-medium

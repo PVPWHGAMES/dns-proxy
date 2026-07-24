@@ -5,8 +5,8 @@
 ## ✨ 特性
 
 - 🌐 **全局 DNS 接管** - 通过 TUN 虚拟网卡或系统 DNS 设置一键接管
-- 🔀 **国内外域名分流** - DNS 服务器分组，国内域名走国内 DNS，国外域名走代理
-- 🗺️ **GeoSite 域名路由** - 内置预设订阅（11 万+ 国内域名、2.7 万+ 代理域名）
+- 🔀 **国内外域名分流** - DNS 服务器分组（直连/代理），国内域名走国内 DNS，国外域名走代理
+- 🗺️ **GeoSite 域名路由** - 内置预设订阅（国内直连域名、代理域名、广告拦截）
 - 🚫 **广告拦截** - 黑名单订阅系统，支持 hosts / AdGuard / 纯域名格式
 - ⚡ **高性能** - Rust 异步处理（Tokio），毫秒级响应，>1000 QPS
 - 📡 **多协议** - 支持 UDP / DoH（DNS over HTTPS）转发
@@ -40,9 +40,8 @@
 
 从 [Releases](https://github.com/PVPWHGAMES/dns-proxy/releases) 页面下载：
 
-- `DNS-Proxy-1.0.2-x64.msi` - MSI 安装包
-- `DNS-Proxy-1.0.2-Setup.exe` - NSIS 安装包
-- `dns-proxy.exe` - 独立可执行文件
+- `DNS Proxy_1.0.3_x64_en-US.msi` - MSI 安装包
+- `DNS Proxy_1.0.3_x64-setup.exe` - NSIS 安装包
 
 > ⚠️ TUN 模式需要**管理员权限**运行
 
@@ -63,10 +62,44 @@ npm run tauri build  # 生产构建
 
 ## 🚀 快速开始
 
-1. 启动程序（TUN 模式需管理员权限）
-2. 在**设置页面**配置上游 DNS 服务器（可一键添加国内/代理预设）
-3. 在**规则页面**添加 GeoSite 域名路由（国内域名 → domestic，国外域名 → proxy）
-4. 点击「启动服务」，系统 DNS 自动切换到本地代理
+### 方案一：DNSProxy TUN + Clash 系统代理（推荐）
+
+推荐的架构：DNSProxy 负责分流决策，Clash 负责代理转发。
+
+```
+应用发起 DNS 请求
+  → DNSProxy TUN 拦截 (:53)
+  → 匹配规则：
+    ├─ 国内域名 → 阿里 DNS 直接解析 → 返回真实 IP → 直连
+    └─ 国外域名 → 转发到 Clash (:7897) → Clash 解析并走代理
+```
+
+**步骤**：
+
+1. **启动 Clash Verge**，确保开启**系统代理**模式（不要开 TUN）
+2. **启动 DNSProxy**（管理员权限）
+3. 进入 **DNS 设置** 页面：
+   - 确认 `domestic`（直连）分组有国内 DNS（如阿里 DNS 223.5.5.5）
+   - 确认 `proxy`（代理）分组有 Clash DNS（127.0.0.1:7897）
+4. 进入 **网络设置** 页面：
+   - 开启 TUN 模式
+   - 开启自动路由
+5. 进入 **规则管理** 页面，添加 GeoSite 预设：
+   - CN 国内直连域名 → 直连
+   - Proxy 需代理域名 → 代理
+6. 点击「启动服务」
+
+### 方案二：仅 DNSProxy（无代理）
+
+不需要代理软件，仅做 DNS 分流和广告拦截。
+
+**步骤**：
+
+1. **启动 DNSProxy**（管理员权限）
+2. 在 **DNS 设置** 配置上游 DNS 服务器
+3. 在 **规则管理** 添加广告拦截订阅
+4. 开启 TUN 或手动设置系统 DNS 为 `127.0.0.1`
+5. 点击「启动服务」
 
 ## 📖 使用说明
 
@@ -76,19 +109,21 @@ npm run tauri build  # 生产构建
 
 | 分组 | 用途 | 示例 |
 |------|------|------|
-| `domestic` | 国内域名 | 阿里 DNS (223.5.5.5)、114DNS (114.114.114.114) |
-| `proxy` | 国外域名（走代理） | Clash DNS (127.0.0.1:1053) |
-| `default` | 默认组 | 兜底服务器 |
+| `domestic`（直连） | 国内域名，直接解析 | 阿里 DNS (223.5.5.5)、114DNS (114.114.114.114)、腾讯 DNS (119.29.29.29) |
+| `proxy`（代理） | 国外域名，通过代理软件解析 | Clash DNS (127.0.0.1:7897) |
+| `default`（默认组） | 兜底服务器 | 未匹配规则时使用 |
 
 ### GeoSite 域名路由
 
 内置预设一键订阅（使用 ghfast.top 加速，国内可直接访问）：
 
-| 预设 | 规模 | 目标分组 |
-|------|------|----------|
-| CN 国内直连域名 | 11.2 万条 | domestic |
-| Proxy 需代理域名 | 2.7 万条 | proxy |
-| 广告拦截域名 | 16.8 万条 | blocklist |
+| 预设 | 目标分组 | 说明 |
+|------|----------|------|
+| CN 国内直连域名 | 直连 | 国内常用域名，走国内 DNS 直接解析 |
+| Apple 中国域名 | 直连 | Apple 在中国的服务 |
+| Google 中国域名 | 直连 | Google 在中国的服务 |
+| Proxy 需代理域名 | 代理 | 需要代理访问的域名 |
+| 广告拦截域名 | 阻止 | 广告/追踪域名，返回空地址 |
 
 来源：[Loyalsoldier/v2ray-rules-dat](https://github.com/Loyalsoldier/v2ray-rules-dat)
 
@@ -111,13 +146,31 @@ npm run tauri build  # 生产构建
 | 负载均衡 | 轮询分配请求到多个服务器 |
 | 并行请求 | 同时请求所有服务器，使用最快响应 |
 
-### 与 ClashVerge 配合
+### 配置文件位置
 
-推荐配置方式：
+配置文件：`%APPDATA%\dns-proxy\config.toml`
 
-1. ClashVerge 开启 TUN 模式，DNS 监听在 `127.0.0.1:1053`
-2. dns-proxy 的 `proxy` 分组配置 Clash DNS (`127.0.0.1:1053`)
-3. 国外域名解析返回 Clash fake-ip，由 Clash TUN 拦截并走代理
+启动服务后自动生成，也可在界面中修改。
+
+## ⚠️ 常见问题
+
+### TUN 模式下 nslookup 返回 fake-ip
+
+如果同时开启了 Clash TUN 和 DNSProxy TUN，两个 TUN 接口会冲突。确保只开一个 TUN：
+- **推荐**：DNSProxy TUN + Clash 系统代理
+- **不推荐**：两个 TUN 同时开启
+
+### 端口 53 被占用
+
+Windows 上可能有其他服务占用 53 端口（如 dnsmasq、DNS Client 服务）。DNSProxy 会自动检测并尝试重启。
+
+### 修改 DNS 设置后不生效
+
+DNS 设置修改后会自动重启服务使配置生效，无需手动操作。
+
+### GeoSite 规则不生效
+
+确保已点击「更新」按钮下载规则数据，并确认目标分组（直连/代理）与 DNS 服务器分组一致。
 
 ## 📁 项目结构
 
@@ -127,7 +180,7 @@ dns-proxy/
 │   ├── src/
 │   │   ├── main.rs         # 入口
 │   │   ├── lib.rs          # Tauri 命令、系统托盘、自动启动
-│   │   ├── config.rs       # 配置管理（TOML）
+│   │   ├── config.rs       # 配置管理（TOML）、配置迁移
 │   │   ├── dns/
 │   │   │   ├── server.rs   # DNS 服务器（UDP 监听）
 │   │   │   ├── handler.rs  # 查询处理（规则、分组转发、缓存）

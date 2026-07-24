@@ -159,15 +159,15 @@ export default function Dashboard() {
           <h3 className="font-semibold">最近查询</h3>
         </div>
         <div className="overflow-x-auto">
-          <table className="w-full">
+          <table className="w-full table-fixed min-w-[700px]">
             <thead>
               <tr className="border-b bg-muted/50">
-                <th className="text-left p-3 text-sm font-medium text-muted-foreground">时间</th>
-                <th className="text-left p-3 text-sm font-medium text-muted-foreground">域名</th>
-                <th className="text-left p-3 text-sm font-medium text-muted-foreground">类型</th>
-                <th className="text-left p-3 text-sm font-medium text-muted-foreground">响应</th>
-                <th className="text-left p-3 text-sm font-medium text-muted-foreground">上游</th>
-                <th className="text-left p-3 text-sm font-medium text-muted-foreground">状态</th>
+                <th className="text-left p-3 text-sm font-medium text-muted-foreground w-[15%]">时间</th>
+                <th className="text-left p-3 text-sm font-medium text-muted-foreground w-[30%]">域名</th>
+                <th className="text-left p-3 text-sm font-medium text-muted-foreground w-[10%]">类型</th>
+                <th className="text-left p-3 text-sm font-medium text-muted-foreground w-[20%]">响应</th>
+                <th className="text-left p-3 text-sm font-medium text-muted-foreground w-[15%]">上游</th>
+                <th className="text-left p-3 text-sm font-medium text-muted-foreground w-[10%]">状态</th>
               </tr>
             </thead>
             <tbody>
@@ -180,36 +180,37 @@ export default function Dashboard() {
               ) : (
                 logs.map((log) => (
                   <tr key={log.id} className="border-b hover:bg-muted/50">
-                    <td className="p-3 text-sm">
-                      <div className="flex items-center gap-2">
-                        <Clock className="w-4 h-4 text-muted-foreground" />
-                        {log.timestamp}
+                    <td className="p-3 text-sm whitespace-nowrap">
+                      <div className="flex items-center gap-2 truncate">
+                        <Clock className="w-4 h-4 text-muted-foreground shrink-0" />
+                        <span className="truncate">{log.timestamp}</span>
                       </div>
                     </td>
                     <td className="p-3 text-sm font-medium">
                       <div className="flex items-center gap-2">
-                        <Globe className="w-4 h-4 text-muted-foreground" />
-                        {log.domain}
+                        <Globe className="w-4 h-4 text-muted-foreground shrink-0" />
+                        <span className="truncate">{log.domain}</span>
                       </div>
                     </td>
-                    <td className="p-3 text-sm">
+                    <td className="p-3 text-sm whitespace-nowrap">
                       <span className="px-2 py-1 rounded bg-muted text-xs font-mono">{log.query_type}</span>
                     </td>
-                    <td className="p-3 text-sm font-mono">{log.response}</td>
+                    <td className="p-3 text-sm font-mono truncate">{log.response}</td>
                     <td className="p-3 text-sm text-muted-foreground">
-                      {log.upstream}
-                      {log.group && (
-                        <span className={`ml-1.5 px-1.5 py-0.5 rounded text-[10px] ${
-                          log.group === "domestic" ? "bg-blue-100 text-blue-600" :
-                          log.group === "foreign" ? "bg-purple-100 text-purple-600" :
-                          log.group === "proxy" ? "bg-orange-100 text-orange-600" :
-                          "bg-gray-100 text-gray-600"
-                        }`}>
-                          {log.group}
-                        </span>
-                      )}
+                      <div className="flex items-center gap-1 truncate">
+                        <span className="truncate">{log.upstream}</span>
+                        {log.group && (
+                          <span className={`shrink-0 px-1.5 py-0.5 rounded text-[10px] ${
+                            log.group === "domestic" ? "bg-blue-100 text-blue-600" :
+                            log.group === "proxy" ? "bg-orange-100 text-orange-600" :
+                            "bg-gray-100 text-gray-600"
+                          }`}>
+                            {log.group === "domestic" ? "直连" : log.group === "proxy" ? "代理" : log.group}
+                          </span>
+                        )}
+                      </div>
                     </td>
-                    <td className="p-3 text-sm">
+                    <td className="p-3 text-sm whitespace-nowrap">
                       <span className={`px-2 py-1 rounded-full text-xs font-medium ${
                         log.action === "success" ? "bg-green-100 text-green-700" :
                         log.action === "blocked" ? "bg-red-100 text-red-700" :
@@ -256,6 +257,21 @@ export default function Dashboard() {
             <InfoItem label="监听地址" value={config ? `${config.proxy.listen_address}:${config.proxy.listen_port}` : "-"} />
             <InfoItem label="策略" value={config ? config.strategy : "-"} />
             <InfoItem label="运行状态" value={stats.is_running ? "运行中" : "已停止"} />
+            <div className="pt-2">
+              <button
+                onClick={async () => {
+                  try {
+                    await api.clearCache();
+                    await refreshStatus();
+                  } catch (e) {
+                    console.error("清空缓存失败:", e);
+                  }
+                }}
+                className="px-3 py-1.5 text-sm bg-muted hover:bg-muted/80 rounded-md transition-colors"
+              >
+                清空 DNS 缓存
+              </button>
+            </div>
           </div>
         </div>
       </div>

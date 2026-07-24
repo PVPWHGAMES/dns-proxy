@@ -27,9 +27,8 @@ pub struct AppConfig {
 fn default_server_groups() -> Vec<ServerGroup> {
     vec![
         ServerGroup { name: "default".to_string(), description: "默认组".to_string() },
-        ServerGroup { name: "domestic".to_string(), description: "国内域名".to_string() },
-        ServerGroup { name: "foreign".to_string(), description: "国外域名".to_string() },
-        ServerGroup { name: "proxy".to_string(), description: "代理 (ClashVerge)".to_string() },
+        ServerGroup { name: "domestic".to_string(), description: "直连".to_string() },
+        ServerGroup { name: "proxy".to_string(), description: "代理".to_string() },
     ]
 }
 
@@ -42,6 +41,13 @@ pub struct ProxyConfig {
     pub cache_ttl: u64,
     pub auto_start: bool,
     pub block_ipv6: bool,
+    /// 默认分组：未匹配任何规则时使用，空字符串表示使用所有服务器
+    #[serde(default = "default_default_group")]
+    pub default_group: String,
+}
+
+fn default_default_group() -> String {
+    "domestic".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -151,6 +157,7 @@ impl Default for AppConfig {
                 cache_ttl: 300,
                 auto_start: false,
                 block_ipv6: false,
+                default_group: "domestic".to_string(),
             },
             upstream: vec![
                 DnsServer {
@@ -163,29 +170,19 @@ impl Default for AppConfig {
                     group: "domestic".to_string(),
                 },
                 DnsServer {
-                    name: "Cloudflare".to_string(),
-                    ip: "1.1.1.1".to_string(),
-                    port: 53,
+                    name: "Clash DNS".to_string(),
+                    ip: "127.0.0.1".to_string(),
+                    port: 1053,
                     enabled: true,
                     protocol: DnsProtocol::Udp,
-                    doh_url: Some("https://cloudflare-dns.com/dns-query".to_string()),
-                    group: "foreign".to_string(),
-                },
-                DnsServer {
-                    name: "Google".to_string(),
-                    ip: "8.8.8.8".to_string(),
-                    port: 53,
-                    enabled: false,
-                    protocol: DnsProtocol::Udp,
-                    doh_url: Some("https://dns.google/dns-query".to_string()),
-                    group: "foreign".to_string(),
+                    doh_url: None,
+                    group: "proxy".to_string(),
                 },
             ],
             server_groups: vec![
                 ServerGroup { name: "default".to_string(), description: "默认组".to_string() },
-                ServerGroup { name: "domestic".to_string(), description: "国内域名".to_string() },
-                ServerGroup { name: "foreign".to_string(), description: "国外域名".to_string() },
-                ServerGroup { name: "proxy".to_string(), description: "代理 (ClashVerge)".to_string() },
+                ServerGroup { name: "domestic".to_string(), description: "直连".to_string() },
+                ServerGroup { name: "proxy".to_string(), description: "代理".to_string() },
             ],
             rules: Vec::new(),
             subscriptions: Vec::new(),
@@ -212,13 +209,74 @@ impl AppConfig {
 
     pub fn load() -> Self {
         let path = Self::config_path();
-        if path.exists() {
+        let mut config = if path.exists() {
             let content = std::fs::read_to_string(&path).unwrap_or_default();
             toml::from_str(&content).unwrap_or_default()
         } else {
-            let config = Self::default();
-            config.save().ok();
-            config
+            Self::default()
+        };
+        config.migrate();
+        config
+    }
+
+    /// 迁移旧配置：合并 foreign 到 proxy，更新分组描述
+    fn migrate(&mut self) {
+        let mut changed = false;
+
+        // 将 upstream 中 group="foreign" 改为 "proxy"
+        for server in &mut self.upstream {
+            if server.group == "foreign" {
+                server.group = "proxy".to_string();
+                changed = true;
+            }
+        }
+
+        // 将订阅中 target_group="foreign" 改为 "proxy"
+        for sub in &mut self.subscriptions {
+            if sub.target_group.as_deref() == Some("foreign") {
+                sub.target_group = Some("proxy".to_string());
+                changed = true;
+            }
+        }
+
+        // 移除 foreign 分组
+        let before = self.server_groups.len();
+        self.server_groups.retain(|g| g.name != "foreign");
+        if self.server_groups.len() != before {
+            changed = true;
+        }
+
+        // 更新分组描述
+        for group in &mut self.server_groups {
+            match group.name.as_str() {
+                "domestic" => {
+                    if group.description != "直连" {
+                        group.description = "直连".to_string();
+                        changed = true;
+                    }
+                }
+                "proxy" => {
+                    if group.description != "代理" {
+                        group.description = "代理".to_string();
+                        changed = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // 确保 domestic 和 proxy 分组存在
+        if !self.server_groups.iter().any(|g| g.name == "domestic") {
+            self.server_groups.push(ServerGroup { name: "domestic".to_string(), description: "直连".to_string() });
+            changed = true;
+        }
+        if !self.server_groups.iter().any(|g| g.name == "proxy") {
+            self.server_groups.push(ServerGroup { name: "proxy".to_string(), description: "代理".to_string() });
+            changed = true;
+        }
+
+        if changed {
+            self.save().ok();
         }
     }
 

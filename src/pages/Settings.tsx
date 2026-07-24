@@ -40,14 +40,26 @@ export default function Settings() {
     }
   };
 
-  // 保存配置
+  // 保存配置并自动重启服务
   const handleSave = async () => {
     if (!config) return;
     setSaving(true);
     setMessage(null);
     try {
       await api.saveConfig(config);
-      setMessage({ type: "success", text: "配置已保存！重启服务后生效。" });
+
+      // 自动重启服务使配置生效
+      try {
+        const isRunning = await api.getServerStatus();
+        if (isRunning) {
+          await api.stopServer();
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+        await api.startServer();
+        setMessage({ type: "success", text: "配置已保存，服务已自动重启。" });
+      } catch (restartErr) {
+        setMessage({ type: "success", text: "配置已保存，但服务重启失败: " + restartErr });
+      }
     } catch (e) {
       setMessage({ type: "error", text: "保存失败: " + e });
     } finally {
@@ -251,6 +263,30 @@ export default function Settings() {
                 <p className="text-xs text-muted-foreground">屏蔽所有 AAAA 记录</p>
               </div>
             </label>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium mb-2">默认分组</label>
+              <select
+                value={config.proxy.default_group}
+                onChange={(e) =>
+                  setConfig({
+                    ...config,
+                    proxy: { ...config.proxy, default_group: e.target.value },
+                  })
+                }
+                className="w-full px-3 py-2 border rounded-lg bg-background"
+              >
+                <option value="">使用所有服务器（不筛选）</option>
+                {(config.server_groups || []).map((g) => (
+                  <option key={g.name} value={g.name}>{g.description || g.name}</option>
+                ))}
+              </select>
+              <p className="text-xs text-muted-foreground mt-1">
+                未匹配任何规则时，默认使用此分组的服务器解析
+              </p>
+            </div>
           </div>
         </div>
       </div>
@@ -528,7 +564,7 @@ export default function Settings() {
                       <p className="font-medium text-sm">{group.description || group.name}</p>
                       <p className="text-xs text-muted-foreground">{group.name} · {serverCount} 个服务器</p>
                     </div>
-                    {group.name !== "default" && group.name !== "domestic" && group.name !== "foreign" && group.name !== "proxy" && (
+                    {group.name !== "default" && group.name !== "domestic" && group.name !== "proxy" && (
                       <button
                         onClick={() => {
                           if (!config) return;
@@ -555,7 +591,7 @@ export default function Settings() {
         <h4 className="font-semibold mb-3">快速添加预设服务器</h4>
         <div className="space-y-3">
           <div>
-            <p className="text-xs text-muted-foreground mb-2">🇨🇳 国内 DNS（分组: domestic）</p>
+            <p className="text-xs text-muted-foreground mb-2">🇨🇳 国内 DNS（直连）</p>
             <div className="flex flex-wrap gap-2">
               {[
                 { name: "阿里 DoH", ip: "223.5.5.5", protocol: "doh" as DnsProtocol, doh_url: "https://dns.alidns.com/dns-query", group: "domestic" },
@@ -585,37 +621,7 @@ export default function Settings() {
             </div>
           </div>
           <div>
-            <p className="text-xs text-muted-foreground mb-2">🌍 国外 DNS（分组: foreign）</p>
-            <div className="flex flex-wrap gap-2">
-              {[
-                { name: "Cloudflare DoH", ip: "1.1.1.1", protocol: "doh" as DnsProtocol, doh_url: "https://cloudflare-dns.com/dns-query", group: "foreign" },
-                { name: "Google DoH", ip: "8.8.8.8", protocol: "doh" as DnsProtocol, doh_url: "https://dns.google/dns-query", group: "foreign" },
-                { name: "Quad9 DoH", ip: "9.9.9.9", protocol: "doh" as DnsProtocol, doh_url: "https://dns.quad9.net/dns-query", group: "foreign" },
-              ].map((preset) => (
-                <button
-                  key={preset.name}
-                  onClick={() => {
-                    if (!config) return;
-                    const exists = config.upstream.some((s) => s.ip === preset.ip && s.protocol === preset.protocol);
-                    if (!exists) {
-                      setConfig({
-                        ...config,
-                        upstream: [
-                          ...config.upstream,
-                          { ...preset, port: 443, enabled: true },
-                        ],
-                      });
-                    }
-                  }}
-                  className="px-3 py-1.5 text-sm border rounded-lg hover:bg-muted"
-                >
-                  + {preset.name}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div>
-            <p className="text-xs text-muted-foreground mb-2">🔗 代理 DNS（分组: proxy）</p>
+            <p className="text-xs text-muted-foreground mb-2">🔗 代理 DNS（代理）</p>
             <div className="flex flex-wrap gap-2">
               {[
                 { name: "Clash DNS", ip: "127.0.0.1", port: 1053, protocol: "udp" as DnsProtocol, group: "proxy" },

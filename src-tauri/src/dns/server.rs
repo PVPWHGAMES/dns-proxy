@@ -215,6 +215,10 @@ impl DnsServer {
         self.handler.clear_logs();
     }
 
+    pub fn clear_cache(&self) {
+        self.handler.clear_cache();
+    }
+
     pub async fn update_subscriptions(&self) {
         self.handler.update_subscriptions().await;
     }
