@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { api, DnsStats, DnsQueryLog, AppConfig } from "../lib/api";
+import { api, DnsStats, DnsQueryLog, AppConfig, TrafficStats } from "../lib/api";
 import {
   Activity,
   Server,
@@ -10,7 +10,22 @@ import {
   Play,
   Square,
   Loader2,
+  BarChart3,
 } from "lucide-react";
+import {
+  AreaChart,
+  Area,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+  BarChart,
+  Bar,
+  PieChart,
+  Pie,
+  Cell,
+} from "recharts";
 
 export default function Dashboard() {
   const [stats, setStats] = useState<DnsStats>({
@@ -22,20 +37,23 @@ export default function Dashboard() {
   });
   const [logs, setLogs] = useState<DnsQueryLog[]>([]);
   const [config, setConfig] = useState<AppConfig | null>(null);
+  const [trafficStats, setTrafficStats] = useState<TrafficStats | null>(null);
   const [loading, setLoading] = useState(false);
   const [initializing, setInitializing] = useState(true);
 
   // 刷新状态
   const refreshStatus = useCallback(async () => {
     try {
-      const [newStats, newLogs, newConfig] = await Promise.all([
+      const [newStats, newLogs, newConfig, newTrafficStats] = await Promise.all([
         api.getStats(),
         api.getLogs(),
         api.getConfig(),
+        api.getTrafficStats(),
       ]);
       setStats(newStats);
       setLogs(newLogs.slice(0, 10));
       setConfig(newConfig);
+      setTrafficStats(newTrafficStats);
     } catch (e) {
       console.error("获取状态失败:", e);
     } finally {
@@ -152,6 +170,169 @@ export default function Dashboard() {
         <StatCard title="平均延迟" value={`${stats.avg_latency.toFixed(1)}ms`} icon={Zap} color="yellow" />
         <StatCard title="缓存命中" value={stats.cached_queries.toLocaleString()} icon={Server} color="green" />
       </div>
+
+      {/* 流量图表区域 */}
+      {trafficStats && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {/* 请求量时间线 */}
+          <div className="bg-card rounded-xl border p-4">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-semibold flex items-center gap-2">
+                <BarChart3 className="w-5 h-5" />
+                请求量趋势
+              </h3>
+              <span className="text-sm text-muted-foreground">
+                QPS: {trafficStats.queries_per_second.toFixed(1)}
+              </span>
+            </div>
+            {trafficStats.timeline.length > 0 ? (
+              <ResponsiveContainer width="100%" height={200}>
+                <AreaChart data={trafficStats.timeline}>
+                  <CartesianGrid strokeDasharray="3 3" className="opacity-30" />
+                  <XAxis
+                    dataKey="time"
+                    tick={{ fontSize: 12 }}
+                    interval="preserveStartEnd"
+                  />
+                  <YAxis tick={{ fontSize: 12 }} />
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: 'var(--card)',
+                      border: '1px solid var(--border)',
+                      borderRadius: '8px',
+                    }}
+                  />
+                  <Area
+                    type="monotone"
+                    dataKey="total"
+                    stackId="1"
+                    stroke="#3b82f6"
+                    fill="#3b82f6"
+                    fillOpacity={0.3}
+                    name="总查询"
+                  />
+                  <Area
+                    type="monotone"
+                    dataKey="blocked"
+                    stackId="2"
+                    stroke="#ef4444"
+                    fill="#ef4444"
+                    fillOpacity={0.3}
+                    name="阻止"
+                  />
+                  <Area
+                    type="monotone"
+                    dataKey="cached"
+                    stackId="3"
+                    stroke="#22c55e"
+                    fill="#22c55e"
+                    fillOpacity={0.3}
+                    name="缓存"
+                  />
+                </AreaChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="h-[200px] flex items-center justify-center text-muted-foreground">
+                暂无数据
+              </div>
+            )}
+          </div>
+
+          {/* Top 10 域名 */}
+          <div className="bg-card rounded-xl border p-4">
+            <h3 className="font-semibold mb-4 flex items-center gap-2">
+              <Globe className="w-5 h-5" />
+              Top 10 热门域名
+            </h3>
+            {trafficStats.top_domains.length > 0 ? (
+              <ResponsiveContainer width="100%" height={200}>
+                <BarChart
+                  data={trafficStats.top_domains}
+                  layout="vertical"
+                  margin={{ left: 80 }}
+                >
+                  <CartesianGrid strokeDasharray="3 3" className="opacity-30" />
+                  <XAxis type="number" tick={{ fontSize: 12 }} />
+                  <YAxis
+                    type="category"
+                    dataKey="domain"
+                    tick={{ fontSize: 11 }}
+                    width={80}
+                  />
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: 'var(--card)',
+                      border: '1px solid var(--border)',
+                      borderRadius: '8px',
+                    }}
+                  />
+                  <Bar dataKey="count" fill="#8b5cf6" radius={[0, 4, 4, 0]} name="查询次数" />
+                </BarChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="h-[200px] flex items-center justify-center text-muted-foreground">
+                暂无数据
+              </div>
+            )}
+          </div>
+
+          {/* 延迟分布 */}
+          <div className="bg-card rounded-xl border p-4">
+            <h3 className="font-semibold mb-4 flex items-center gap-2">
+              <Zap className="w-5 h-5" />
+              响应延迟分布
+            </h3>
+            {trafficStats.latency_dist.some(d => d.count > 0) ? (
+              <ResponsiveContainer width="100%" height={200}>
+                <BarChart data={trafficStats.latency_dist}>
+                  <CartesianGrid strokeDasharray="3 3" className="opacity-30" />
+                  <XAxis dataKey="range" tick={{ fontSize: 11 }} />
+                  <YAxis tick={{ fontSize: 12 }} />
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: 'var(--card)',
+                      border: '1px solid var(--border)',
+                      borderRadius: '8px',
+                    }}
+                  />
+                  <Bar dataKey="count" fill="#f59e0b" radius={[4, 4, 0, 0]} name="查询次数" />
+                </BarChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="h-[200px] flex items-center justify-center text-muted-foreground">
+                暂无数据
+              </div>
+            )}
+          </div>
+
+          {/* 查询类型分布（新增） */}
+          <div className="bg-card rounded-xl border p-4">
+            <h3 className="font-semibold mb-4 flex items-center gap-2">
+              <Activity className="w-5 h-5" />
+              查询统计
+            </h3>
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-4">
+                <div className="text-center p-3 bg-muted/50 rounded-lg">
+                  <p className="text-2xl font-bold text-blue-600">
+                    {trafficStats.total_queries.toLocaleString()}
+                  </p>
+                  <p className="text-sm text-muted-foreground">总查询数</p>
+                </div>
+                <div className="text-center p-3 bg-muted/50 rounded-lg">
+                  <p className="text-2xl font-bold text-green-600">
+                    {trafficStats.queries_per_second.toFixed(1)}
+                  </p>
+                  <p className="text-sm text-muted-foreground">QPS</p>
+                </div>
+              </div>
+              <div className="text-sm text-muted-foreground text-center">
+                统计时间: 最近 60 分钟
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 最近查询 */}
       <div className="bg-card rounded-xl border">

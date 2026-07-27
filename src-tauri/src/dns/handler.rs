@@ -2,7 +2,7 @@ use crate::config::{AppConfig, DnsProtocol, DnsStrategy, RuleAction, RuleType, S
 use crate::dns::cache::DnsCache;
 use crate::dns::ecs;
 use crate::dns::DnsQueryLog;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -25,6 +25,7 @@ pub struct DnsHandler {
     server_latency: Arc<Mutex<HashMap<String, ServerLatency>>>,  // 服务器延迟统计
     public_ip: Arc<Mutex<Option<IpAddr>>>,  // 自动获取的公网 IP
     public_ip_last_update: Arc<Mutex<Option<Instant>>>,  // 上次更新时间
+    traffic_stats: Arc<Mutex<TrafficStatsCollector>>,  // 流量统计收集器
 }
 
 #[derive(Clone, Default)]
@@ -43,6 +44,52 @@ pub struct QueryStats {
     pub total_latency_ms: u64,
 }
 
+/// 时间桶统计（每分钟）
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TimeBucket {
+    pub time: String,      // "HH:MM" 格式
+    pub total: u64,        // 总查询数
+    pub blocked: u64,      // 阻止数
+    pub cached: u64,       // 缓存命中数
+}
+
+/// 域名统计
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DomainStat {
+    pub domain: String,
+    pub count: u64,
+}
+
+/// 延迟分布
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LatencyDistribution {
+    pub range: String,     // "0-10ms", "10-50ms", etc.
+    pub count: u64,
+}
+
+/// 流量统计数据（返回给前端）
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TrafficStats {
+    pub timeline: Vec<TimeBucket>,           // 时间线数据
+    pub top_domains: Vec<DomainStat>,        // Top 10 域名
+    pub latency_dist: Vec<LatencyDistribution>, // 延迟分布
+    pub total_queries: u64,
+    pub queries_per_second: f64,
+}
+
+/// 时间序列数据收集器
+#[derive(Default)]
+pub struct TrafficStatsCollector {
+    // 按分钟统计的时间线 (格式: "HH:MM" -> (total, blocked, cached))
+    pub minute_buckets: BTreeMap<String, (u64, u64, u64)>,
+    // 域名计数
+    pub domain_counts: HashMap<String, u64>,
+    // 延迟分布
+    pub latency_buckets: [u64; 6], // 0-10, 10-50, 50-100, 100-200, 200-500, 500+
+    // 启动时间
+    pub start_time: Option<Instant>,
+}
+
 impl DnsHandler {
     pub fn new(config: AppConfig, cache: Arc<DnsCache>) -> Self {
         let http_client = reqwest::Client::builder()
@@ -59,6 +106,10 @@ impl DnsHandler {
         let public_ip = Arc::new(Mutex::new(None));
         let public_ip_last_update = Arc::new(Mutex::new(None));
 
+        // 初始化流量统计收集器
+        let mut traffic_collector = TrafficStatsCollector::default();
+        traffic_collector.start_time = Some(Instant::now());
+
         // 加载已有的订阅规则
         let handler = Self {
             config: Arc::new(Mutex::new(config.clone())),
@@ -73,6 +124,7 @@ impl DnsHandler {
             server_latency,
             public_ip,
             public_ip_last_update,
+            traffic_stats: Arc::new(Mutex::new(traffic_collector)),
         };
 
         // 初始化黑名单和域名路由
@@ -920,6 +972,13 @@ impl DnsHandler {
             }
         }
 
+        // 更新流量统计
+        if let Ok(mut traffic) = self.traffic_stats.lock() {
+            traffic.record_to_bucket(false, false);
+            traffic.record_domain(domain);
+            traffic.record_latency(latency);
+        }
+
         info!("DNS查询: {} {} -> {} via {} ({}ms)", domain, qtype, response, upstream, latency);
     }
 
@@ -948,6 +1007,12 @@ impl DnsHandler {
             logs.insert(0, log);
         }
 
+        // 更新流量统计
+        if let Ok(mut traffic) = self.traffic_stats.lock() {
+            traffic.record_to_bucket(true, false);
+            traffic.record_domain(domain);
+        }
+
         info!("DNS阻止: {} {}", domain, qtype);
     }
 
@@ -974,6 +1039,13 @@ impl DnsHandler {
 
         if let Ok(mut logs) = self.logs.lock() {
             logs.insert(0, log);
+        }
+
+        // 更新流量统计
+        if let Ok(mut traffic) = self.traffic_stats.lock() {
+            traffic.record_to_bucket(false, true);
+            traffic.record_domain(domain);
+            traffic.record_latency(start.elapsed().as_millis() as u64);
         }
     }
 
@@ -1008,6 +1080,122 @@ impl DnsHandler {
 
     pub async fn get_config(&self) -> AppConfig {
         self.config.lock().unwrap().clone()
+    }
+
+    /// 获取流量统计数据
+    pub fn get_traffic_stats(&self) -> TrafficStats {
+        let traffic = self.traffic_stats.lock().unwrap();
+        let stats = self.stats.lock().unwrap();
+
+        // 构建时间线数据
+        let timeline: Vec<TimeBucket> = traffic.minute_buckets
+            .iter()
+            .map(|(time, (total, blocked, cached))| TimeBucket {
+                time: time.clone(),
+                total: *total,
+                blocked: *blocked,
+                cached: *cached,
+            })
+            .collect();
+
+        // 构建 Top 10 域名
+        let mut domain_vec: Vec<(String, u64)> = traffic.domain_counts
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        domain_vec.sort_by(|a, b| b.1.cmp(&a.1));
+        let top_domains: Vec<DomainStat> = domain_vec
+            .into_iter()
+            .take(10)
+            .map(|(domain, count)| DomainStat { domain, count })
+            .collect();
+
+        // 构建延迟分布
+        let latency_ranges = ["0-10ms", "10-50ms", "50-100ms", "100-200ms", "200-500ms", "500ms+"];
+        let latency_dist: Vec<LatencyDistribution> = latency_ranges
+            .iter()
+            .zip(traffic.latency_buckets.iter())
+            .map(|(range, &count)| LatencyDistribution {
+                range: range.to_string(),
+                count,
+            })
+            .collect();
+
+        // 计算 QPS
+        let elapsed_secs = traffic.start_time
+            .map(|t| t.elapsed().as_secs_f64())
+            .unwrap_or(1.0);
+        let qps = if elapsed_secs > 0.0 {
+            stats.total_queries as f64 / elapsed_secs
+        } else {
+            0.0
+        };
+
+        TrafficStats {
+            timeline,
+            top_domains,
+            latency_dist,
+            total_queries: stats.total_queries,
+            queries_per_second: qps,
+        }
+    }
+}
+
+// TrafficStatsCollector 实现
+impl TrafficStatsCollector {
+    /// 记录查询到时间桶
+    fn record_to_bucket(&mut self, is_blocked: bool, is_cached: bool) {
+        let time_key = chrono::Local::now().format("%H:%M").to_string();
+        let entry = self.minute_buckets.entry(time_key).or_insert((0, 0, 0));
+        entry.0 += 1; // total
+        if is_blocked {
+            entry.1 += 1; // blocked
+        }
+        if is_cached {
+            entry.2 += 1; // cached
+        }
+
+        // 只保留最近 60 分钟的数据
+        let cutoff = (chrono::Local::now() - chrono::Duration::minutes(60))
+            .format("%H:%M")
+            .to_string();
+        while let Some(first_key) = self.minute_buckets.keys().next().cloned() {
+            if first_key < cutoff {
+                self.minute_buckets.remove(&first_key);
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// 记录域名查询
+    fn record_domain(&mut self, domain: &str) {
+        *self.domain_counts.entry(domain.to_string()).or_insert(0) += 1;
+
+        // 只保留 Top 100 域名，避免内存溢出
+        if self.domain_counts.len() > 100 {
+            // 找到最小计数并移除
+            if let Some(min_domain) = self.domain_counts
+                .iter()
+                .min_by_key(|(_, count)| *count)
+                .map(|(domain, _)| domain.clone())
+            {
+                self.domain_counts.remove(&min_domain);
+            }
+        }
+    }
+
+    /// 记录延迟
+    fn record_latency(&mut self, latency_ms: u64) {
+        let bucket = match latency_ms {
+            0..=10 => 0,
+            11..=50 => 1,
+            51..=100 => 2,
+            101..=200 => 3,
+            201..=500 => 4,
+            _ => 5,
+        };
+        self.latency_buckets[bucket] += 1;
     }
 }
 

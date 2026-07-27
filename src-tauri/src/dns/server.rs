@@ -1,6 +1,6 @@
 use crate::config::AppConfig;
 use crate::dns::cache::DnsCache;
-use crate::dns::handler::DnsHandler;
+use crate::dns::handler::{DnsHandler, TrafficStats};
 use crate::dns::DnsQueryLog;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::net::SocketAddr;
@@ -209,6 +209,10 @@ impl DnsServer {
 
     pub fn get_stats(&self) -> (u64, u64, u64, f64) {
         self.handler.get_stats()
+    }
+
+    pub fn get_traffic_stats(&self) -> TrafficStats {
+        self.handler.get_traffic_stats()
     }
 
     pub fn clear_logs(&self) {

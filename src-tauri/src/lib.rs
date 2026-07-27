@@ -4,7 +4,7 @@ mod tun;
 
 use config::AppConfig;
 use dns::server::DnsServer;
-use dns::{DnsQueryLog, DnsStats};
+use dns::{DnsQueryLog, DnsStats, TrafficStats};
 use std::sync::Arc;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -104,6 +104,12 @@ async fn clear_cache(state: State<'_, AppState>) -> Result<(), String> {
     let server = state.server.lock().await;
     server.clear_cache();
     Ok(())
+}
+
+#[tauri::command]
+async fn get_traffic_stats(state: State<'_, AppState>) -> Result<TrafficStats, String> {
+    let server = state.server.lock().await;
+    Ok(server.get_traffic_stats())
 }
 
 #[tauri::command]
@@ -813,6 +819,7 @@ pub fn run() {
             clear_logs,
             clear_cache,
             update_subscriptions,
+            get_traffic_stats,
             get_tun_config,
             save_tun_config,
             start_tun,

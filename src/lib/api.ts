@@ -123,6 +123,31 @@ export interface DnsLatencyResult {
   error?: string;
 }
 
+export interface TimeBucket {
+  time: string;
+  total: number;
+  blocked: number;
+  cached: number;
+}
+
+export interface DomainStat {
+  domain: string;
+  count: number;
+}
+
+export interface LatencyDistribution {
+  range: string;
+  count: number;
+}
+
+export interface TrafficStats {
+  timeline: TimeBucket[];
+  top_domains: DomainStat[];
+  latency_dist: LatencyDistribution[];
+  total_queries: number;
+  queries_per_second: number;
+}
+
 export const api = {
   async getConfig(): Promise<AppConfig> {
     return await invoke("get_config");
@@ -158,6 +183,10 @@ export const api = {
 
   async clearCache(): Promise<void> {
     return await invoke("clear_cache");
+  },
+
+  async getTrafficStats(): Promise<TrafficStats> {
+    return await invoke("get_traffic_stats");
   },
 
   async updateSubscriptions(): Promise<string> {

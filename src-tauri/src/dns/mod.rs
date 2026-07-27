@@ -27,3 +27,6 @@ pub struct DnsStats {
     pub avg_latency: f64,
     pub is_running: bool,
 }
+
+// 重新导出流量统计类型
+pub use handler::{TrafficStats, TimeBucket, DomainStat, LatencyDistribution};
