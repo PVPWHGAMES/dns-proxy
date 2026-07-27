@@ -1,5 +1,5 @@
 use crate::config::AppConfig;
-use crate::dns::cache::DnsCache;
+use crate::dns::cache::{CacheStats, DnsCache};
 use crate::dns::handler::{DnsHandler, TrafficStats};
 use crate::dns::DnsQueryLog;
 use socket2::{Domain, Protocol, Socket, Type};
@@ -221,6 +221,14 @@ impl DnsServer {
 
     pub fn clear_cache(&self) {
         self.handler.clear_cache();
+    }
+
+    pub fn get_cache_stats(&self) -> CacheStats {
+        self.handler.get_cache_stats()
+    }
+
+    pub fn cleanup_expired_cache(&self) {
+        self.handler.cleanup_expired_cache();
     }
 
     pub async fn update_subscriptions(&self) {

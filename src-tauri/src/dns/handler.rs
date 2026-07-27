@@ -1132,6 +1132,16 @@ impl DnsHandler {
             queries_per_second: qps,
         }
     }
+
+    /// 获取缓存统计信息
+    pub fn get_cache_stats(&self) -> crate::dns::cache::CacheStats {
+        self.cache.get_stats()
+    }
+
+    /// 清理过期缓存
+    pub fn cleanup_expired_cache(&self) {
+        self.cache.cleanup_expired();
+    }
 }
 
 // TrafficStatsCollector 实现

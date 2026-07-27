@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { api, DnsStats, DnsQueryLog, AppConfig, TrafficStats } from "../lib/api";
+import { api, DnsStats, DnsQueryLog, AppConfig, TrafficStats, CacheStats } from "../lib/api";
 import {
   Activity,
   Server,
@@ -38,22 +38,25 @@ export default function Dashboard() {
   const [logs, setLogs] = useState<DnsQueryLog[]>([]);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [trafficStats, setTrafficStats] = useState<TrafficStats | null>(null);
+  const [cacheStats, setCacheStats] = useState<CacheStats | null>(null);
   const [loading, setLoading] = useState(false);
   const [initializing, setInitializing] = useState(true);
 
   // 刷新状态
   const refreshStatus = useCallback(async () => {
     try {
-      const [newStats, newLogs, newConfig, newTrafficStats] = await Promise.all([
+      const [newStats, newLogs, newConfig, newTrafficStats, newCacheStats] = await Promise.all([
         api.getStats(),
         api.getLogs(),
         api.getConfig(),
         api.getTrafficStats(),
+        api.getCacheStats(),
       ]);
       setStats(newStats);
       setLogs(newLogs.slice(0, 10));
       setConfig(newConfig);
       setTrafficStats(newTrafficStats);
+      setCacheStats(newCacheStats);
     } catch (e) {
       console.error("获取状态失败:", e);
     } finally {
@@ -331,6 +334,42 @@ export default function Dashboard() {
               </div>
             </div>
           </div>
+
+          {/* 缓存统计 */}
+          {cacheStats && (
+            <div className="bg-card rounded-xl border p-4">
+              <h3 className="font-semibold mb-4 flex items-center gap-2">
+                <Server className="w-5 h-5" />
+                缓存统计
+              </h3>
+              <div className="space-y-4">
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="text-center p-3 bg-muted/50 rounded-lg">
+                    <p className="text-2xl font-bold text-purple-600">
+                      {(cacheStats.hit_rate * 100).toFixed(1)}%
+                    </p>
+                    <p className="text-sm text-muted-foreground">命中率</p>
+                  </div>
+                  <div className="text-center p-3 bg-muted/50 rounded-lg">
+                    <p className="text-2xl font-bold text-orange-600">
+                      {cacheStats.current_size}/{cacheStats.max_size}
+                    </p>
+                    <p className="text-sm text-muted-foreground">缓存条目</p>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-4 text-sm">
+                  <div className="flex justify-between px-2">
+                    <span className="text-muted-foreground">命中</span>
+                    <span className="font-medium text-green-600">{cacheStats.cache_hits.toLocaleString()}</span>
+                  </div>
+                  <div className="flex justify-between px-2">
+                    <span className="text-muted-foreground">未命中</span>
+                    <span className="font-medium text-red-600">{cacheStats.cache_misses.toLocaleString()}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
 

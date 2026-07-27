@@ -148,6 +148,15 @@ export interface TrafficStats {
   queries_per_second: number;
 }
 
+export interface CacheStats {
+  total_queries: number;
+  cache_hits: number;
+  cache_misses: number;
+  hit_rate: number;
+  current_size: number;
+  max_size: number;
+}
+
 export const api = {
   async getConfig(): Promise<AppConfig> {
     return await invoke("get_config");
@@ -187,6 +196,10 @@ export const api = {
 
   async getTrafficStats(): Promise<TrafficStats> {
     return await invoke("get_traffic_stats");
+  },
+
+  async getCacheStats(): Promise<CacheStats> {
+    return await invoke("get_cache_stats");
   },
 
   async updateSubscriptions(): Promise<string> {
