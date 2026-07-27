@@ -661,7 +661,7 @@ impl DnsHandler {
         server: &crate::config::DnsServer,
     ) -> Option<Vec<u8>> {
         // 获取 ECS 配置并注入 ECS 信息
-        let query_with_ecs = self.maybe_inject_ecs(query_bytes);
+        let query_with_ecs = self.maybe_inject_ecs(query_bytes).await;
 
         match server.protocol {
             DnsProtocol::Udp | DnsProtocol::Tcp => {
@@ -683,10 +683,12 @@ impl DnsHandler {
     }
 
     /// 如果启用了 ECS，则在 DNS 查询中注入 ECS 信息
-    fn maybe_inject_ecs(&self, query_bytes: &[u8]) -> Vec<u8> {
-        let config = self.config.lock().unwrap();
-        let ecs_config = &config.ecs.clone();
-        drop(config);
+    async fn maybe_inject_ecs(&self, query_bytes: &[u8]) -> Vec<u8> {
+        // 克隆 ECS 配置，避免持有 MutexGuard 跨越 await
+        let ecs_config = {
+            let config = self.config.lock().unwrap();
+            config.ecs.clone()
+        };
 
         if !ecs_config.enabled {
             return query_bytes.to_vec();
@@ -703,7 +705,7 @@ impl DnsHandler {
             }
         } else {
             // 自动获取公网 IP（带缓存，每5分钟更新一次）
-            match self.get_or_fetch_public_ip_sync() {
+            match self.get_or_fetch_public_ip().await {
                 Some(ip) => ip,
                 None => {
                     warn!("无法获取公网 IP，跳过 ECS 注入");
@@ -722,8 +724,8 @@ impl DnsHandler {
         ecs::inject_ecs(query_bytes, client_ip, source_mask)
     }
 
-    /// 获取公网 IP（同步版本，带缓存）
-    fn get_or_fetch_public_ip_sync(&self) -> Option<IpAddr> {
+    /// 获取公网 IP（异步版本，带缓存）
+    async fn get_or_fetch_public_ip(&self) -> Option<IpAddr> {
         // 检查缓存是否有效（5分钟内）
         {
             let last_update = self.public_ip_last_update.lock().unwrap();
@@ -735,21 +737,12 @@ impl DnsHandler {
             }
         }
 
-        // 缓存过期，需要更新（在后台异步执行）
-        let public_ip = self.public_ip.clone();
-        let public_ip_last_update = self.public_ip_last_update.clone();
-        let http_client = self.http_client.clone();
-
-        // 尝试同步获取（使用 block_on，但设置较短超时）
-        let rt = tokio::runtime::Handle::current();
-        let result = rt.block_on(async {
-            fetch_public_ip(&http_client).await
-        });
-
-        if let Some(ip) = result {
-            let mut cached_ip = public_ip.lock().unwrap();
+        // 缓存过期，需要更新
+        let ip = fetch_public_ip(&self.http_client).await;
+        if let Some(ip) = ip {
+            let mut cached_ip = self.public_ip.lock().unwrap();
             *cached_ip = Some(ip);
-            let mut last_update = public_ip_last_update.lock().unwrap();
+            let mut last_update = self.public_ip_last_update.lock().unwrap();
             *last_update = Some(Instant::now());
             info!("自动获取公网 IP: {}", ip);
             Some(ip)
@@ -760,6 +753,7 @@ impl DnsHandler {
         }
     }
 
+    /// 获取公网 IP（同步版本，带缓存）
     /// 异步更新公网 IP（可在后台定期调用）
     pub async fn update_public_ip(&self) {
         let ip = fetch_public_ip(&self.http_client).await;
