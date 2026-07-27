@@ -139,7 +139,9 @@ npm run lint
 ### 版本号管理
 
 - **自动生成安装包时**：自动将所有版本号显示位置的版本号递增（如 `1.0.6` → `1.0.7`）
-- **版本号位置**：`Cargo.toml`、`package.json`、`tauri.conf.json` 等配置文件中的版本字段
+- **版本号位置**：
+  - 配置文件：`Cargo.toml`、`package.json`、`tauri.conf.json`
+  - 前端页面：`src/components/Sidebar.tsx`（左上角）、`src/pages/About.tsx`（关于页面）
 - **特殊说明优先**：如果用户明确指定了版本号，则使用用户指定的版本
 
 ## 环境要求
