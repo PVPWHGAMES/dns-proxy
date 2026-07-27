@@ -1,6 +1,7 @@
 pub mod server;
 pub mod handler;
 pub mod cache;
+pub mod ecs;
 
 use serde::{Deserialize, Serialize};
 

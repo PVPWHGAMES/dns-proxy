@@ -30,6 +30,7 @@ impl Default for TunConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TunStatus {
     pub active: bool,
+    pub starting: bool,
     pub interface_name: String,
     pub ip_address: String,
     pub dns_redirected: bool,

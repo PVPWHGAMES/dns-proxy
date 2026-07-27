@@ -1,12 +1,13 @@
 use crate::config::{AppConfig, DnsProtocol, DnsStrategy, RuleAction, RuleType, Subscription, SubscriptionType};
 use crate::dns::cache::DnsCache;
+use crate::dns::ecs;
 use crate::dns::DnsQueryLog;
 use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
-use tracing::{info, warn};
+use tracing::{info, warn, debug};
 use trust_dns_client::op::Message;
 use trust_dns_client::rr::{Record, RecordType, RData};
 use trust_dns_proto::serialize::binary::{BinDecodable, BinEncodable};
@@ -21,6 +22,17 @@ pub struct DnsHandler {
     http_client: Arc<reqwest::Client>,
     blocklist: Arc<Mutex<HashSet<String>>>,  // 黑名单域名集合
     geosite_map: Arc<Mutex<HashMap<String, String>>>,  // 域名 -> 目标分组
+    server_latency: Arc<Mutex<HashMap<String, ServerLatency>>>,  // 服务器延迟统计
+    public_ip: Arc<Mutex<Option<IpAddr>>>,  // 自动获取的公网 IP
+    public_ip_last_update: Arc<Mutex<Option<Instant>>>,  // 上次更新时间
+}
+
+#[derive(Clone, Default)]
+struct ServerLatency {
+    avg_latency_ms: u64,
+    success_count: u64,
+    fail_count: u64,
+    last_latency_ms: Option<u64>,
 }
 
 #[derive(Default, Clone)]
@@ -35,12 +47,17 @@ impl DnsHandler {
     pub fn new(config: AppConfig, cache: Arc<DnsCache>) -> Self {
         let http_client = reqwest::Client::builder()
             .timeout(Duration::from_secs(3))
-            .pool_max_idle_per_host(4)
+            .pool_max_idle_per_host(8)
+            .pool_idle_timeout(Duration::from_secs(90))
+            .http2_prior_knowledge()
             .build()
             .unwrap_or_default();
 
         let blocklist = Arc::new(Mutex::new(HashSet::new()));
         let geosite_map = Arc::new(Mutex::new(HashMap::new()));
+        let server_latency = Arc::new(Mutex::new(HashMap::new()));
+        let public_ip = Arc::new(Mutex::new(None));
+        let public_ip_last_update = Arc::new(Mutex::new(None));
 
         // 加载已有的订阅规则
         let handler = Self {
@@ -53,6 +70,9 @@ impl DnsHandler {
             http_client: Arc::new(http_client),
             blocklist,
             geosite_map,
+            server_latency,
+            public_ip,
+            public_ip_last_update,
         };
 
         // 初始化黑名单和域名路由
@@ -88,6 +108,37 @@ impl DnsHandler {
             }
         }
         info!("已加载 {} 条域名路由规则", map.len());
+    }
+
+    // 更新服务器延迟统计
+    fn update_server_latency(&self, server_name: &str, latency_ms: u64, success: bool) {
+        let mut latency_map = self.server_latency.lock().unwrap();
+        let entry = latency_map.entry(server_name.to_string()).or_default();
+
+        if success {
+            entry.success_count += 1;
+            entry.last_latency_ms = Some(latency_ms);
+            // 使用指数移动平均计算平均延迟
+            if entry.avg_latency_ms == 0 {
+                entry.avg_latency_ms = latency_ms;
+            } else {
+                entry.avg_latency_ms = (entry.avg_latency_ms * 7 + latency_ms * 3) / 10;
+            }
+        } else {
+            entry.fail_count += 1;
+        }
+    }
+
+    // 获取服务器的历史延迟
+    fn get_server_latency(&self, server_name: &str) -> Option<u64> {
+        let latency_map = self.server_latency.lock().unwrap();
+        latency_map.get(server_name).and_then(|l| {
+            if l.success_count > 0 {
+                Some(l.avg_latency_ms)
+            } else {
+                None
+            }
+        })
     }
 
     // 更新订阅
@@ -439,51 +490,79 @@ impl DnsHandler {
         match strategy {
             DnsStrategy::Sequential => {
                 for server in servers {
+                    let start = Instant::now();
                     if let Some(response) = self.forward_to_server(query_bytes, server).await {
+                        let latency = start.elapsed().as_millis() as u64;
+                        self.update_server_latency(&server.name, latency, true);
                         return (Some(response), server.name.clone());
+                    } else {
+                        let latency = start.elapsed().as_millis() as u64;
+                        self.update_server_latency(&server.name, latency, false);
                     }
                 }
                 (None, "none".to_string())
             }
             DnsStrategy::Fastest => {
-                // 真正的最快策略：返回第一个成功的响应
-                let futures: Vec<std::pin::Pin<Box<dyn futures::Future<Output = Option<(Vec<u8>, String)>> + Send>>> = servers
+                // 智能最快策略：优先使用历史延迟最低的服务器
+                let fastest_server = self.get_fastest_server(servers);
+                if let Some(server) = fastest_server {
+                    let start = Instant::now();
+                    if let Some(response) = self.forward_to_server(query_bytes, &server).await {
+                        let latency = start.elapsed().as_millis() as u64;
+                        self.update_server_latency(&server.name, latency, true);
+                        return (Some(response), server.name.clone());
+                    } else {
+                        let latency = start.elapsed().as_millis() as u64;
+                        self.update_server_latency(&server.name, latency, false);
+                    }
+                }
+
+                // 回退到并发查询
+                let futures: Vec<std::pin::Pin<Box<dyn futures::Future<Output = Option<(Vec<u8>, String, Instant)>> + Send>>> = servers
                     .iter()
                     .map(|s| {
                         let s = s.clone();
                         let bytes = query_bytes.to_vec();
                         Box::pin(async move {
+                            let start = Instant::now();
                             let result = self.forward_to_server(&bytes, &s).await;
-                            result.map(|r| (r, s.name.clone()))
-                        }) as std::pin::Pin<Box<dyn futures::Future<Output = Option<(Vec<u8>, String)>> + Send>>
+                            result.map(|r| (r, s.name.clone(), start))
+                        }) as std::pin::Pin<Box<dyn futures::Future<Output = Option<(Vec<u8>, String, Instant)>> + Send>>
                     })
                     .collect();
 
-                // 使用 select_all 返回第一个完成的 future
                 let (result, _index, _remaining) = futures::future::select_all(futures).await;
                 match result {
-                    Some((resp, name)) => (Some(resp), name),
+                    Some((resp, name, start)) => {
+                        let latency = start.elapsed().as_millis() as u64;
+                        self.update_server_latency(&name, latency, true);
+                        (Some(resp), name)
+                    }
                     None => (None, "none".to_string()),
                 }
             }
             DnsStrategy::Parallel => {
                 // 并行策略：同时发送到所有服务器，返回第一个成功的响应
-                let futures: Vec<std::pin::Pin<Box<dyn futures::Future<Output = Option<(Vec<u8>, String)>> + Send>>> = servers
+                let futures: Vec<std::pin::Pin<Box<dyn futures::Future<Output = Option<(Vec<u8>, String, Instant)>> + Send>>> = servers
                     .iter()
                     .map(|s| {
                         let s = s.clone();
                         let bytes = query_bytes.to_vec();
                         Box::pin(async move {
+                            let start = Instant::now();
                             let result = self.forward_to_server(&bytes, &s).await;
-                            result.map(|r| (r, s.name.clone()))
-                        }) as std::pin::Pin<Box<dyn futures::Future<Output = Option<(Vec<u8>, String)>> + Send>>
+                            result.map(|r| (r, s.name.clone(), start))
+                        }) as std::pin::Pin<Box<dyn futures::Future<Output = Option<(Vec<u8>, String, Instant)>> + Send>>
                     })
                     .collect();
 
-                // 使用 select_all 返回第一个完成的 future
                 let (result, _index, _remaining) = futures::future::select_all(futures).await;
                 match result {
-                    Some((resp, name)) => (Some(resp), name),
+                    Some((resp, name, start)) => {
+                        let latency = start.elapsed().as_millis() as u64;
+                        self.update_server_latency(&name, latency, true);
+                        (Some(resp), name)
+                    }
                     None => (None, "none".to_string()),
                 }
             }
@@ -497,10 +576,32 @@ impl DnsHandler {
 
                 let server = &servers[index];
                 let name = server.name.clone();
+                let start = Instant::now();
                 let result = self.forward_to_server(query_bytes, server).await;
+                let latency = start.elapsed().as_millis() as u64;
+                self.update_server_latency(&name, latency, result.is_some());
                 (result, name)
             }
         }
+    }
+
+    // 获取历史延迟最低的服务器
+    fn get_fastest_server(&self, servers: &[crate::config::DnsServer]) -> Option<crate::config::DnsServer> {
+        let latency_map = self.server_latency.lock().unwrap();
+
+        let mut best_server: Option<crate::config::DnsServer> = None;
+        let mut best_latency = u64::MAX;
+
+        for server in servers {
+            if let Some(latency_entry) = latency_map.get(&server.name) {
+                if latency_entry.success_count > 0 && latency_entry.avg_latency_ms < best_latency {
+                    best_latency = latency_entry.avg_latency_ms;
+                    best_server = Some(server.clone());
+                }
+            }
+        }
+
+        best_server
     }
 
     async fn forward_to_server(
@@ -508,20 +609,115 @@ impl DnsHandler {
         query_bytes: &[u8],
         server: &crate::config::DnsServer,
     ) -> Option<Vec<u8>> {
+        // 获取 ECS 配置并注入 ECS 信息
+        let query_with_ecs = self.maybe_inject_ecs(query_bytes);
+
         match server.protocol {
             DnsProtocol::Udp | DnsProtocol::Tcp => {
-                self.forward_udp(query_bytes, &server.ip, server.port).await
+                self.forward_udp(&query_with_ecs, &server.ip, server.port).await
             }
             DnsProtocol::Doh => {
                 let url = server
                     .doh_url
                     .as_deref()
                     .unwrap_or("https://cloudflare-dns.com/dns-query");
-                self.forward_doh(query_bytes, url).await
+                self.forward_doh(&query_with_ecs, url).await
             }
             DnsProtocol::Dot => {
-                self.forward_udp(query_bytes, &server.ip, server.port).await
+                // DoT 默认端口为 853
+                let port = if server.port == 53 { 853 } else { server.port };
+                self.forward_dot(&query_with_ecs, &server.ip, port).await
             }
+        }
+    }
+
+    /// 如果启用了 ECS，则在 DNS 查询中注入 ECS 信息
+    fn maybe_inject_ecs(&self, query_bytes: &[u8]) -> Vec<u8> {
+        let config = self.config.lock().unwrap();
+        let ecs_config = &config.ecs.clone();
+        drop(config);
+
+        if !ecs_config.enabled {
+            return query_bytes.to_vec();
+        }
+
+        // 获取客户端 IP：优先使用配置的 IP，否则自动获取公网 IP
+        let client_ip = if let Some(ref ip_str) = ecs_config.client_ip {
+            match ip_str.parse::<IpAddr>() {
+                Ok(ip) => ip,
+                Err(_) => {
+                    warn!("无效的 ECS 客户端 IP: {}", ip_str);
+                    return query_bytes.to_vec();
+                }
+            }
+        } else {
+            // 自动获取公网 IP（带缓存，每5分钟更新一次）
+            match self.get_or_fetch_public_ip_sync() {
+                Some(ip) => ip,
+                None => {
+                    warn!("无法获取公网 IP，跳过 ECS 注入");
+                    return query_bytes.to_vec();
+                }
+            }
+        };
+
+        // 根据 IP 类型选择掩码
+        let source_mask = match client_ip {
+            IpAddr::V4(_) => ecs_config.ipv4_source_mask,
+            IpAddr::V6(_) => ecs_config.ipv6_source_mask,
+        };
+
+        debug!("注入 ECS: client_ip={}, mask=/{}/", client_ip, source_mask);
+        ecs::inject_ecs(query_bytes, client_ip, source_mask)
+    }
+
+    /// 获取公网 IP（同步版本，带缓存）
+    fn get_or_fetch_public_ip_sync(&self) -> Option<IpAddr> {
+        // 检查缓存是否有效（5分钟内）
+        {
+            let last_update = self.public_ip_last_update.lock().unwrap();
+            if let Some(last) = *last_update {
+                if last.elapsed() < Duration::from_secs(300) {
+                    let ip = self.public_ip.lock().unwrap();
+                    return *ip;
+                }
+            }
+        }
+
+        // 缓存过期，需要更新（在后台异步执行）
+        let public_ip = self.public_ip.clone();
+        let public_ip_last_update = self.public_ip_last_update.clone();
+        let http_client = self.http_client.clone();
+
+        // 尝试同步获取（使用 block_on，但设置较短超时）
+        let rt = tokio::runtime::Handle::current();
+        let result = rt.block_on(async {
+            fetch_public_ip(&http_client).await
+        });
+
+        if let Some(ip) = result {
+            let mut cached_ip = public_ip.lock().unwrap();
+            *cached_ip = Some(ip);
+            let mut last_update = public_ip_last_update.lock().unwrap();
+            *last_update = Some(Instant::now());
+            info!("自动获取公网 IP: {}", ip);
+            Some(ip)
+        } else {
+            // 获取失败，返回缓存的 IP（如果有）
+            let cached_ip = self.public_ip.lock().unwrap();
+            *cached_ip
+        }
+    }
+
+    /// 异步更新公网 IP（可在后台定期调用）
+    pub async fn update_public_ip(&self) {
+        let ip = fetch_public_ip(&self.http_client).await;
+        if let Some(ip) = ip {
+            let mut cached_ip = self.public_ip.lock().unwrap();
+            *cached_ip = Some(ip);
+            let mut last_update = self.public_ip_last_update.lock().unwrap();
+            *last_update = Some(Instant::now());
+            info!("更新公网 IP: {}", ip);
         }
     }
 
@@ -564,6 +760,101 @@ impl DnsHandler {
         } else {
             warn!("DoH请求失败: {} {}", url, response.status());
             None
+        }
+    }
+
+    /// DoT (DNS-over-TLS) 转发
+    async fn forward_dot(
+        &self,
+        query_bytes: &[u8],
+        ip: &str,
+        port: u16,
+    ) -> Option<Vec<u8>> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpStream;
+        use tokio_rustls::TlsConnector;
+
+        let addr = format!("{}:{}", ip, port);
+
+        // 建立 TCP 连接
+        let tcp = match tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(&addr)).await {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(e)) => {
+                warn!("DoT TCP连接失败 {}: {}", addr, e);
+                return None;
+            }
+            Err(_) => {
+                warn!("DoT TCP连接超时: {}", addr);
+                return None;
+            }
+        };
+
+        // 配置 TLS
+        let mut root_store = rustls::RootCertStore::empty();
+        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let config = rustls::ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+
+        let connector = TlsConnector::from(std::sync::Arc::new(config));
+
+        // TLS 握手
+        let domain = match rustls::pki_types::ServerName::try_from(ip.to_string()) {
+            Ok(d) => d,
+            Err(e) => {
+                warn!("DoT 无效域名 {}: {}", ip, e);
+                return None;
+            }
+        };
+
+        let mut tls = match tokio::time::timeout(Duration::from_secs(3), connector.connect(domain, tcp)).await {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(e)) => {
+                warn!("DoT TLS握手失败 {}: {}", addr, e);
+                return None;
+            }
+            Err(_) => {
+                warn!("DoT TLS握手超时: {}", addr);
+                return None;
+            }
+        };
+
+        // 发送 DNS 查询（DoT 使用 TCP 格式：2字节长度前缀 + 查询数据）
+        let len = (query_bytes.len() as u16).to_be_bytes();
+        if let Err(e) = tls.write_all(&len).await {
+            warn!("DoT 发送长度失败: {}", e);
+            return None;
+        }
+        if let Err(e) = tls.write_all(query_bytes).await {
+            warn!("DoT 发送查询失败: {}", e);
+            return None;
+        }
+
+        // 读取响应长度
+        let mut len_buf = [0u8; 2];
+        if let Err(e) = tls.read_exact(&mut len_buf).await {
+            warn!("DoT 读取响应长度失败: {}", e);
+            return None;
+        }
+        let resp_len = u16::from_be_bytes(len_buf) as usize;
+
+        if resp_len > 4096 {
+            warn!("DoT 响应长度异常: {}", resp_len);
+            return None;
+        }
+
+        // 读取响应数据
+        let mut resp_buf = vec![0u8; resp_len];
+        match tokio::time::timeout(Duration::from_secs(3), tls.read_exact(&mut resp_buf)).await {
+            Ok(Ok(_)) => Some(resp_buf),
+            Ok(Err(e)) => {
+                warn!("DoT 读取响应失败: {}", e);
+                None
+            }
+            Err(_) => {
+                warn!("DoT 读取响应超时");
+                None
+            }
         }
     }
 
@@ -718,4 +1009,34 @@ impl DnsHandler {
     pub async fn get_config(&self) -> AppConfig {
         self.config.lock().unwrap().clone()
     }
+}
+
+/// 从公共服务获取公网 IP
+async fn fetch_public_ip(client: &reqwest::Client) -> Option<IpAddr> {
+    // 尝试多个服务，提高成功率
+    let services = [
+        "https://api.ipify.org",
+        "https://ip.sb",
+        "https://ifconfig.me/ip",
+        "https://icanhazip.com",
+        "https://checkip.amazonaws.com",
+    ];
+
+    for service in &services {
+        match tokio::time::timeout(Duration::from_secs(3), client.get(*service).send()).await {
+            Ok(Ok(resp)) => {
+                if let Ok(text) = resp.text().await {
+                    let ip_str = text.trim();
+                    if let Ok(ip) = ip_str.parse::<IpAddr>() {
+                        debug!("从 {} 获取到公网 IP: {}", service, ip);
+                        return Some(ip);
+                    }
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    warn!("所有公网 IP 服务均不可用");
+    None
 }

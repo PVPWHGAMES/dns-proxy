@@ -1,6 +1,6 @@
 [package]
 name = "dns-proxy"
-version = "1.0.4"
+version = "1.0.5"
 description = "Windows全局DNS代理软件"
 authors = ["you"]
 edition = "2021"
@@ -33,3 +33,6 @@ base64 = "0.22"
 futures = "0.3"
 wintun = "0.4"
 socket2 = "0.5"
+tokio-rustls = "0.26"
+rustls = "0.23"
+webpki-roots = "0.26"

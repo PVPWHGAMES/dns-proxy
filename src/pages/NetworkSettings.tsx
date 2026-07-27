@@ -12,6 +12,9 @@ import {
 } from "lucide-react";
 import { api, TunConfig, TunStatus } from "../lib/api";
 
+// 兼容 NodeJS.Timeout 类型
+type TimerHandle = ReturnType<typeof setInterval>;
+
 export default function NetworkSettings() {
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
@@ -25,6 +28,7 @@ export default function NetworkSettings() {
   });
   const [tunStatus, setTunStatus] = useState<TunStatus>({
     active: false,
+    starting: false,
     interface_name: "",
     ip_address: "",
     dns_redirected: false,
@@ -34,8 +38,29 @@ export default function NetworkSettings() {
 
   useEffect(() => {
     loadConfig();
-    const interval = setInterval(refreshStatus, 2000);
-    return () => clearInterval(interval);
+
+    // 初始加载时更频繁地轮询（每500ms），直到状态稳定
+    let fastInterval: TimerHandle | null = null;
+    let normalInterval: TimerHandle | null = null;
+    let checkCount = 0;
+
+    // 快速轮询阶段：前10秒每500ms检查一次
+    fastInterval = setInterval(async () => {
+      await refreshStatus();
+      checkCount++;
+
+      // 10秒后（20次）切换到正常轮询
+      if (checkCount >= 20) {
+        if (fastInterval) clearInterval(fastInterval);
+        fastInterval = null;
+        normalInterval = setInterval(refreshStatus, 2000);
+      }
+    }, 500);
+
+    return () => {
+      if (fastInterval) clearInterval(fastInterval);
+      if (normalInterval) clearInterval(normalInterval);
+    };
   }, []);
 
   const loadConfig = async () => {
@@ -139,12 +164,22 @@ export default function NetworkSettings() {
             <div className="p-3 bg-muted rounded-lg">
               <p className="text-sm text-muted-foreground">TUN状态</p>
               <div className="flex items-center gap-2 mt-1">
-                {tunStatus.active ? (
-                  <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                {tunStatus.starting ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin text-yellow-500" />
+                    <p className="font-medium text-yellow-600">启动中...</p>
+                  </>
+                ) : tunStatus.active ? (
+                  <>
+                    <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                    <p className="font-medium text-green-600">运行中</p>
+                  </>
                 ) : (
-                  <div className="w-2 h-2 rounded-full bg-gray-400" />
+                  <>
+                    <div className="w-2 h-2 rounded-full bg-gray-400" />
+                    <p className="font-medium">未启动</p>
+                  </>
                 )}
-                <p className="font-medium">{tunStatus.active ? "运行中" : "未启动"}</p>
               </div>
             </div>
             <div className="p-3 bg-muted rounded-lg">
@@ -170,7 +205,7 @@ export default function NetworkSettings() {
             {tunStatus.active ? (
               <button
                 onClick={handleStopTun}
-                disabled={loading}
+                disabled={loading || tunStatus.starting}
                 className="flex items-center gap-2 px-4 py-2 text-sm bg-destructive text-destructive-foreground rounded-lg hover:bg-destructive/90 disabled:opacity-50"
               >
                 {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Power className="w-4 h-4" />}
@@ -179,11 +214,25 @@ export default function NetworkSettings() {
             ) : (
               <button
                 onClick={handleStartTun}
-                disabled={loading}
+                disabled={loading || tunStatus.starting}
                 className="flex items-center gap-2 px-4 py-2 text-sm bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 disabled:opacity-50"
               >
-                {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
-                {loading ? "启动中..." : "启动TUN"}
+                {tunStatus.starting ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    启动中...
+                  </>
+                ) : loading ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    处理中...
+                  </>
+                ) : (
+                  <>
+                    <Zap className="w-4 h-4" />
+                    启动TUN
+                  </>
+                )}
               </button>
             )}
           </div>

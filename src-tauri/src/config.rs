@@ -22,6 +22,44 @@ pub struct AppConfig {
     pub server_groups: Vec<ServerGroup>,
     #[serde(default)]
     pub tun: TunConfig,
+    #[serde(default)]
+    pub ecs: EcsConfig,
+}
+
+/// EDNS Client Subnet (ECS) 配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EcsConfig {
+    /// 是否启用 ECS
+    #[serde(default)]
+    pub enabled: bool,
+    /// 客户端 IP 地址（如果为 None，则使用系统 IP）
+    #[serde(default)]
+    pub client_ip: Option<String>,
+    /// IPv4 源掩码长度（默认 24，即 /24 子网）
+    #[serde(default = "default_ipv4_mask")]
+    pub ipv4_source_mask: u8,
+    /// IPv6 源掩码长度（默认 56，即 /56 子网）
+    #[serde(default = "default_ipv6_mask")]
+    pub ipv6_source_mask: u8,
+}
+
+impl Default for EcsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            client_ip: None,
+            ipv4_source_mask: 24,
+            ipv6_source_mask: 56,
+        }
+    }
+}
+
+fn default_ipv4_mask() -> u8 {
+    24
+}
+
+fn default_ipv6_mask() -> u8 {
+    56
 }
 
 fn default_server_groups() -> Vec<ServerGroup> {
@@ -194,6 +232,7 @@ impl Default for AppConfig {
             },
             strategy: DnsStrategy::Fastest,
             tun: TunConfig::default(),
+            ecs: EcsConfig::default(),
         }
     }
 }

@@ -58,6 +58,13 @@ export interface LogConfig {
   file?: string;
 }
 
+export interface EcsConfig {
+  enabled: boolean;
+  client_ip?: string;
+  ipv4_source_mask: number;
+  ipv6_source_mask: number;
+}
+
 export interface AppConfig {
   proxy: ProxyConfig;
   upstream: DnsServer[];
@@ -68,6 +75,7 @@ export interface AppConfig {
   log: LogConfig;
   strategy: DnsStrategy;
   server_groups: ServerGroup[];
+  ecs: EcsConfig;
 }
 
 export interface TunConfig {
@@ -81,6 +89,7 @@ export interface TunConfig {
 
 export interface TunStatus {
   active: boolean;
+  starting: boolean;
   interface_name: string;
   ip_address: string;
   dns_redirected: boolean;

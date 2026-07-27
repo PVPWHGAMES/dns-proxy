@@ -19,6 +19,7 @@ pub struct AppState {
     config: Arc<Mutex<AppConfig>>,
     tun_device: Arc<Mutex<TunDevice>>,
     tun_config: Arc<Mutex<TunConfig>>,
+    tun_starting: Arc<Mutex<bool>>,
     latency_results: Arc<Mutex<Vec<DnsLatencyResult>>>,
     latency_last_test: Arc<Mutex<Option<String>>>,
 }
@@ -149,7 +150,46 @@ async fn start_tun(state: State<'_, AppState>) -> Result<String, String> {
     let tun_config = config.clone();
     drop(config);
 
-    let mut tun = state.tun_device.lock().await;
+    // 检查是否已在启动中
+    {
+        let starting = state.tun_starting.lock().await;
+        if *starting {
+            return Ok("TUN正在启动中...".to_string());
+        }
+    }
+
+    // 设置启动中状态
+    {
+        let mut starting = state.tun_starting.lock().await;
+        *starting = true;
+    }
+
+    // 克隆需要的 Arc 字段
+    let tun_device = state.tun_device.clone();
+    let tun_starting = state.tun_starting.clone();
+    let server = state.server.clone();
+
+    // 异步启动TUN
+    tokio::spawn(async move {
+        let result = start_tun_internal(tun_device.clone(), server, tun_config).await;
+        let mut starting = tun_starting.lock().await;
+        *starting = false;
+
+        match result {
+            Ok(_) => tracing::info!("TUN异步启动完成"),
+            Err(e) => tracing::error!("TUN异步启动失败: {}", e),
+        }
+    });
+
+    Ok("TUN正在启动...".to_string())
+}
+
+async fn start_tun_internal(
+    tun_device: Arc<Mutex<TunDevice>>,
+    server: Arc<Mutex<DnsServer>>,
+    tun_config: TunConfig,
+) -> Result<(), String> {
+    let mut tun = tun_device.lock().await;
 
     // 更新TUN设备配置
     *tun = TunDevice::new(tun_config);
@@ -158,13 +198,14 @@ async fn start_tun(state: State<'_, AppState>) -> Result<String, String> {
     tun.start().await.map_err(|e| e.to_string())?;
 
     // 启动DNS拦截器
-    let tun_clone = state.tun_device.clone();
-    let server = state.server.lock().await;
+    let tun_clone = tun_device.clone();
+    drop(tun);
+    let server = server.lock().await;
     let handler = server.get_dns_handler();
     let interceptor = DnsInterceptor::new(tun_clone);
     interceptor.start(handler).await;
 
-    Ok("TUN设备已启动".to_string())
+    Ok(())
 }
 
 #[tauri::command]
@@ -178,12 +219,16 @@ async fn stop_tun(state: State<'_, AppState>) -> Result<String, String> {
 async fn get_tun_status(state: State<'_, AppState>) -> Result<TunStatus, String> {
     let tun = state.tun_device.lock().await;
     let config = state.tun_config.lock().await;
+    let starting = state.tun_starting.lock().await;
+
+    let active = tun.is_running().await;
 
     Ok(TunStatus {
-        active: tun.is_running().await,
-        interface_name: config.interface_name.clone(),
-        ip_address: config.gateway.clone(),
-        dns_redirected: tun.is_running().await,
+        active,
+        starting: *starting,
+        interface_name: if active { config.interface_name.clone() } else { String::new() },
+        ip_address: if active { config.gateway.clone() } else { String::new() },
+        dns_redirected: active,
         packets_processed: 0,
     })
 }
@@ -225,6 +270,15 @@ async fn get_latency_results(state: State<'_, AppState>) -> Result<(Vec<DnsLaten
 async fn run_latency_test(servers: &[crate::config::DnsServer]) -> Vec<DnsLatencyResult> {
     let mut results = Vec::new();
 
+    // 创建优化的 HTTP 客户端（启用 HTTP/2、连接池）
+    let http_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .pool_max_idle_per_host(8)
+        .pool_idle_timeout(std::time::Duration::from_secs(90))
+        .http2_prior_knowledge()
+        .build()
+        .unwrap_or_default();
+
     for server in servers {
         let name = server.name.clone();
         let ip = server.ip.clone();
@@ -264,13 +318,12 @@ async fn run_latency_test(servers: &[crate::config::DnsServer]) -> Vec<DnsLatenc
                 }
             }
             crate::config::DnsProtocol::Doh => {
-                // DoH 测试
+                // DoH 测试 - 复用连接池
                 let url = server
                     .doh_url
                     .as_deref()
                     .unwrap_or("https://cloudflare-dns.com/dns-query");
-                let client = reqwest::Client::new();
-                match client
+                match http_client
                     .post(url)
                     .header("Content-Type", "application/dns-message")
                     .header("Accept", "application/dns-message")
@@ -286,32 +339,9 @@ async fn run_latency_test(servers: &[crate::config::DnsServer]) -> Vec<DnsLatenc
                 }
             }
             crate::config::DnsProtocol::Dot => {
-                // DoT 测试 (简化为TCP)
-                match tokio::net::UdpSocket::bind("0.0.0.0:0").await {
-                    Ok(socket) => {
-                        if let Err(e) = socket.connect(&addr).await {
-                            Err(format!("连接失败: {}", e))
-                        } else {
-                            match socket.send(&query).await {
-                                Ok(_) => {
-                                    let mut buf = vec![0u8; 512];
-                                    match tokio::time::timeout(
-                                        std::time::Duration::from_secs(2),
-                                        socket.recv(&mut buf),
-                                    )
-                                    .await
-                                    {
-                                        Ok(Ok(len)) => Ok(buf[..len].to_vec()),
-                                        Ok(Err(e)) => Err(format!("接收失败: {}", e)),
-                                        Err(_) => Err("超时".to_string()),
-                                    }
-                                }
-                                Err(e) => Err(format!("发送失败: {}", e)),
-                            }
-                        }
-                    }
-                    Err(e) => Err(format!("绑定失败: {}", e)),
-                }
+                // DoT 测试 - 使用 TLS 连接
+                let dot_port = if server.port == 53 { 853 } else { server.port };
+                test_dot_connection(&server.ip, dot_port, &query).await
             }
         };
 
@@ -345,6 +375,63 @@ async fn run_latency_test(servers: &[crate::config::DnsServer]) -> Vec<DnsLatenc
     });
 
     results
+}
+
+/// 测试 DoT (DNS-over-TLS) 连接
+async fn test_dot_connection(ip: &str, port: u16, query: &[u8]) -> Result<Vec<u8>, String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+    use tokio_rustls::TlsConnector;
+
+    let addr = format!("{}:{}", ip, port);
+
+    // 建立 TCP 连接
+    let tcp = match tokio::time::timeout(std::time::Duration::from_secs(3), TcpStream::connect(&addr)).await {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(e)) => return Err(format!("TCP连接失败: {}", e)),
+        Err(_) => return Err("TCP连接超时".to_string()),
+    };
+
+    // 配置 TLS
+    let mut root_store = rustls::RootCertStore::empty();
+    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let config = rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+
+    let connector = TlsConnector::from(std::sync::Arc::new(config));
+
+    // TLS 握手
+    let domain = rustls::pki_types::ServerName::try_from(ip.to_string())
+        .map_err(|e| format!("无效域名: {}", e))?;
+
+    let mut tls = match tokio::time::timeout(std::time::Duration::from_secs(3), connector.connect(domain, tcp)).await {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(e)) => return Err(format!("TLS握手失败: {}", e)),
+        Err(_) => return Err("TLS握手超时".to_string()),
+    };
+
+    // 发送 DNS 查询（DoT 使用 TCP 格式：2字节长度前缀 + 查询数据）
+    let len = (query.len() as u16).to_be_bytes();
+    tls.write_all(&len).await.map_err(|e| format!("发送长度失败: {}", e))?;
+    tls.write_all(query).await.map_err(|e| format!("发送查询失败: {}", e))?;
+
+    // 读取响应长度
+    let mut len_buf = [0u8; 2];
+    tls.read_exact(&mut len_buf).await.map_err(|e| format!("读取响应长度失败: {}", e))?;
+    let resp_len = u16::from_be_bytes(len_buf) as usize;
+
+    if resp_len > 4096 {
+        return Err(format!("响应长度异常: {}", resp_len));
+    }
+
+    // 读取响应数据
+    let mut resp_buf = vec![0u8; resp_len];
+    match tokio::time::timeout(std::time::Duration::from_secs(3), tls.read_exact(&mut resp_buf)).await {
+        Ok(Ok(_)) => Ok(resp_buf),
+        Ok(Err(e)) => Err(format!("读取响应失败: {}", e)),
+        Err(_) => Err("读取响应超时".to_string()),
+    }
 }
 
 fn build_dns_query(domain: &str) -> Vec<u8> {
@@ -407,6 +494,7 @@ pub fn run() {
         config: Arc::new(Mutex::new(config)),
         tun_device: Arc::new(Mutex::new(tun_device)),
         tun_config: Arc::new(Mutex::new(tun_config)),
+        tun_starting: Arc::new(Mutex::new(false)),
         latency_results: latency_results.clone(),
         latency_last_test: latency_last_test.clone(),
     };
@@ -676,6 +764,32 @@ pub fn run() {
 
                     // 等待下次测速
                     tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
+                }
+            });
+
+            // 定期更新公网 IP（用于 ECS）
+            let app_handle_ip = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                // 启动后等待 30 秒再执行第一次更新
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+
+                loop {
+                    let state = app_handle_ip.state::<AppState>();
+                    let ecs_enabled = {
+                        let config = state.config.lock().await;
+                        config.ecs.enabled
+                    };
+
+                    if ecs_enabled {
+                        // 获取 server 的 handler 来更新公网 IP
+                        let server = state.server.lock().await;
+                        let handler = server.get_dns_handler();
+                        handler.update_public_ip().await;
+                        tracing::info!("自动更新公网 IP 完成");
+                    }
+
+                    // 每 5 分钟更新一次
+                    tokio::time::sleep(std::time::Duration::from_secs(300)).await;
                 }
             });
 

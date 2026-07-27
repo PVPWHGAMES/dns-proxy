@@ -265,6 +265,89 @@ export default function Settings() {
             </label>
           </div>
 
+          {/* ECS 配置 */}
+          <div className="space-y-3 pt-3 border-t">
+            <label className="flex items-center gap-3 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={config.ecs?.enabled || false}
+                onChange={(e) =>
+                  setConfig({
+                    ...config,
+                    ecs: { ...config.ecs, enabled: e.target.checked },
+                  })
+                }
+                className="w-4 h-4"
+              />
+              <div>
+                <p className="text-sm font-medium">启用 EDNS Client Subnet (ECS)</p>
+                <p className="text-xs text-muted-foreground">传递客户端位置信息，让 CDN 返回更近的节点</p>
+              </div>
+            </label>
+
+            {config.ecs?.enabled && (
+              <div className="ml-7 space-y-3">
+                <div>
+                  <label className="block text-sm font-medium mb-2">客户端 IP</label>
+                  <input
+                    type="text"
+                    value={config.ecs?.client_ip || ""}
+                    onChange={(e) =>
+                      setConfig({
+                        ...config,
+                        ecs: { ...config.ecs, client_ip: e.target.value || undefined },
+                      })
+                    }
+                    placeholder="留空自动获取公网 IP"
+                    className="w-full px-3 py-2 border rounded-lg bg-background"
+                  />
+                  <p className="text-xs text-muted-foreground mt-1">
+                    留空将自动获取公网 IP（每5分钟更新），也可手动填写固定 IP
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium mb-2">IPv4 掩码长度</label>
+                    <select
+                      value={config.ecs?.ipv4_source_mask || 24}
+                      onChange={(e) =>
+                        setConfig({
+                          ...config,
+                          ecs: { ...config.ecs, ipv4_source_mask: parseInt(e.target.value) },
+                        })
+                      }
+                      className="w-full px-3 py-2 border rounded-lg bg-background"
+                    >
+                      <option value={32}>/32 - 精确到主机</option>
+                      <option value={24}>/24 - 精确到子网（推荐）</option>
+                      <option value={16}>/16 - 精确到城市</option>
+                      <option value={8}>/8 - 精确到国家</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium mb-2">IPv6 掩码长度</label>
+                    <select
+                      value={config.ecs?.ipv6_source_mask || 56}
+                      onChange={(e) =>
+                        setConfig({
+                          ...config,
+                          ecs: { ...config.ecs, ipv6_source_mask: parseInt(e.target.value) },
+                        })
+                      }
+                      className="w-full px-3 py-2 border rounded-lg bg-background"
+                    >
+                      <option value={128}>/128 - 精确到主机</option>
+                      <option value={56}>/56 - 精确到子网（推荐）</option>
+                      <option value={48}>/48 - 精确到站点</option>
+                      <option value={32}>/32 - 精确到 ISP</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium mb-2">默认分组</label>
