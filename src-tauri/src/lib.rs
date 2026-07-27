@@ -276,12 +276,11 @@ async fn get_latency_results(state: State<'_, AppState>) -> Result<(Vec<DnsLaten
 async fn run_latency_test(servers: &[crate::config::DnsServer]) -> Vec<DnsLatencyResult> {
     let mut results = Vec::new();
 
-    // 创建优化的 HTTP 客户端（启用 HTTP/2、连接池）
+    // 创建优化的 HTTP 客户端（连接池）
     let http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
         .pool_max_idle_per_host(8)
         .pool_idle_timeout(std::time::Duration::from_secs(90))
-        .http2_prior_knowledge()
         .build()
         .unwrap_or_default();
 

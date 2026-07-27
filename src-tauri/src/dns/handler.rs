@@ -96,7 +96,6 @@ impl DnsHandler {
             .timeout(Duration::from_secs(3))
             .pool_max_idle_per_host(8)
             .pool_idle_timeout(Duration::from_secs(90))
-            .http2_prior_knowledge()
             .build()
             .unwrap_or_default();
 
