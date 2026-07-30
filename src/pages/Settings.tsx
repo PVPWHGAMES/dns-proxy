@@ -85,6 +85,26 @@ export default function Settings() {
     });
   };
 
+  // 切换协议时自动调整默认值
+  const handleProtocolChange = (index: number, protocol: DnsProtocol) => {
+    if (!config) return;
+    const newUpstream = [...config.upstream];
+    const server = { ...newUpstream[index] };
+    server.protocol = protocol;
+
+    // 根据协议设置合适的默认端口
+    if (protocol === "dot") {
+      server.port = 853;
+    } else if (protocol === "doh") {
+      server.port = 443;
+    } else {
+      server.port = 53;
+    }
+
+    newUpstream[index] = server;
+    setConfig({ ...config, upstream: newUpstream });
+  };
+
   // 删除服务器
   const handleRemoveServer = (index: number) => {
     if (!config) return;
@@ -548,7 +568,7 @@ export default function Settings() {
                 </select>
                 <select
                   value={server.protocol}
-                  onChange={(e) => handleServerChange(index, "protocol", e.target.value as DnsProtocol)}
+                  onChange={(e) => handleProtocolChange(index, e.target.value as DnsProtocol)}
                   className="px-3 py-1.5 border rounded bg-background text-sm"
                 >
                   <option value="udp">UDP</option>
@@ -565,42 +585,66 @@ export default function Settings() {
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                <div>
-                  <label className="block text-xs text-muted-foreground mb-1">IP 地址</label>
-                  <input
-                    type="text"
-                    value={server.ip}
-                    onChange={(e) => handleServerChange(index, "ip", e.target.value)}
-                    className="w-full px-3 py-1.5 border rounded bg-background text-sm font-mono"
-                    placeholder="1.1.1.1"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs text-muted-foreground mb-1">端口</label>
-                  <input
-                    type="number"
-                    value={server.port}
-                    onChange={(e) => handleServerChange(index, "port", parseInt(e.target.value) || 53)}
-                    className="w-full px-3 py-1.5 border rounded bg-background text-sm font-mono"
-                  />
-                </div>
-                {(server.protocol === "doh" || server.protocol === "dot") && (
-                  <div>
-                    <label className="block text-xs text-muted-foreground mb-1">
-                      {server.protocol === "doh" ? "DoH URL" : "DoT 主机名"}
-                    </label>
+                {server.protocol === "doh" ? (
+                  /* DoH: 只需要 URL */
+                  <div className="md:col-span-3">
+                    <label className="block text-xs text-muted-foreground mb-1">DoH URL</label>
                     <input
                       type="text"
                       value={server.doh_url || ""}
                       onChange={(e) => handleServerChange(index, "doh_url", e.target.value)}
                       className="w-full px-3 py-1.5 border rounded bg-background text-sm"
-                      placeholder={
-                        server.protocol === "doh"
-                          ? "https://cloudflare-dns.com/dns-query"
-                          : "cloudflare-dns.com"
-                      }
+                      placeholder="https://cloudflare-dns.com/dns-query"
                     />
+                    <p className="text-xs text-muted-foreground mt-1">DoH 协议使用 URL 访问，无需填写 IP 地址</p>
                   </div>
+                ) : server.protocol === "dot" ? (
+                  /* DoT: 主机名 + 端口 */
+                  <>
+                    <div className="md:col-span-2">
+                      <label className="block text-xs text-muted-foreground mb-1">主机名（域名或 IP）</label>
+                      <input
+                        type="text"
+                        value={server.ip}
+                        onChange={(e) => handleServerChange(index, "ip", e.target.value)}
+                        className="w-full px-3 py-1.5 border rounded bg-background text-sm font-mono"
+                        placeholder="cloudflare-dns.com 或 1.1.1.1"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-muted-foreground mb-1">端口</label>
+                      <input
+                        type="number"
+                        value={server.port || 853}
+                        onChange={(e) => handleServerChange(index, "port", parseInt(e.target.value) || 853)}
+                        className="w-full px-3 py-1.5 border rounded bg-background text-sm font-mono"
+                        placeholder="853"
+                      />
+                    </div>
+                  </>
+                ) : (
+                  /* UDP/TCP: IP + 端口 */
+                  <>
+                    <div>
+                      <label className="block text-xs text-muted-foreground mb-1">IP 地址</label>
+                      <input
+                        type="text"
+                        value={server.ip}
+                        onChange={(e) => handleServerChange(index, "ip", e.target.value)}
+                        className="w-full px-3 py-1.5 border rounded bg-background text-sm font-mono"
+                        placeholder="1.1.1.1"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-muted-foreground mb-1">端口</label>
+                      <input
+                        type="number"
+                        value={server.port}
+                        onChange={(e) => handleServerChange(index, "port", parseInt(e.target.value) || 53)}
+                        className="w-full px-3 py-1.5 border rounded bg-background text-sm font-mono"
+                      />
+                    </div>
+                  </>
                 )}
               </div>
             </div>
