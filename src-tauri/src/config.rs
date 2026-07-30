@@ -146,6 +146,7 @@ pub enum RuleType {
 #[serde(rename_all = "lowercase")]
 pub enum RuleAction {
     Forward,
+    Allow,       // 白名单，跳过黑名单检查
     Block,
     BlockNull,   // 返回0.0.0.0
     BlockNxdomain, // 返回NXDOMAIN

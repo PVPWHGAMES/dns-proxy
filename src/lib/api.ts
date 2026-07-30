@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 export type DnsProtocol = "udp" | "tcp" | "doh" | "dot";
 export type DnsStrategy = "sequential" | "fastest" | "load_balance" | "parallel";
 export type RuleType = "exact" | "wildcard" | "regex" | "blocklist";
-export type RuleAction = "forward" | "block" | "block_null" | "block_nxdomain" | "cache";
+export type RuleAction = "forward" | "allow" | "block" | "block_null" | "block_nxdomain" | "cache";
 
 export interface DnsServer {
   name: string;

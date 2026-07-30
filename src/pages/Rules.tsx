@@ -507,6 +507,36 @@ export default function Rules() {
                   ))}
                 </div>
               </div>
+              <div>
+                <p className="text-xs text-muted-foreground mb-1">🛡️ 恶意域名防护 (→ blocklist)</p>
+                <div className="flex flex-wrap gap-2">
+                  {[
+                    { name: "PhishTank 钓鱼网站", url: "https://raw.githubusercontent.com/stamparm/maltrail/master/trails/static/suspicious/domain.txt" },
+                    { name: "Malware 恶意软件域名", url: "https://raw.githubusercontent.com/stamparm/maltrail/master/trails/static/malware/domain.txt" },
+                    { name: "恶意域名综合列表", url: "https://ghfast.top/https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/reject-list.txt" },
+                  ].map((preset) => (
+                    <button
+                      key={preset.name}
+                      onClick={async () => {
+                        if (!config) return;
+                        const exists = config.subscriptions.some((s) => s.url === preset.url);
+                        if (exists) { alert("该订阅已存在"); return; }
+                        await saveConfig({
+                          ...config,
+                          subscriptions: [...config.subscriptions, {
+                            name: preset.name, url: preset.url, enabled: true,
+                            rules: [], last_updated: undefined,
+                            sub_type: "blocklist" as SubscriptionType,
+                          }],
+                        });
+                      }}
+                      className="px-2 py-1 text-xs border rounded hover:bg-muted"
+                    >
+                      + {preset.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
           </div>
 
@@ -588,6 +618,7 @@ export default function Rules() {
                 <option value="regex">正则表达式</option>
               </select>
               <select value={newRule.action} onChange={(e) => setNewRule({ ...newRule, action: e.target.value as RuleAction })} className="px-3 py-2 border rounded-lg bg-background text-sm">
+                <option value="allow">白名单 (放行)</option>
                 <option value="block">阻止 (返回0.0.0.0)</option>
                 <option value="block_nxdomain">阻止 (NXDOMAIN)</option>
                 <option value="forward">转发到服务器组</option>
@@ -643,8 +674,8 @@ export default function Rules() {
                     </span>
                   </td>
                   <td className="p-3 text-sm">
-                    <span className={`px-2 py-1 rounded text-xs ${rule.action === "block" || rule.action === "block_null" || rule.action === "block_nxdomain" ? "bg-red-100 text-red-700" : rule.action === "forward" ? "bg-green-100 text-green-700" : "bg-yellow-100 text-yellow-700"}`}>
-                      {rule.action === "block" ? "阻止" : rule.action === "block_null" ? "阻止(0.0.0.0)" : rule.action === "block_nxdomain" ? "阻止(NX)" : rule.action === "forward" ? `转发 → ${rule.target || "默认"}` : "缓存"}
+                    <span className={`px-2 py-1 rounded text-xs ${rule.action === "allow" ? "bg-emerald-100 text-emerald-700" : rule.action === "block" || rule.action === "block_null" || rule.action === "block_nxdomain" ? "bg-red-100 text-red-700" : rule.action === "forward" ? "bg-green-100 text-green-700" : "bg-yellow-100 text-yellow-700"}`}>
+                      {rule.action === "allow" ? "白名单" : rule.action === "block" ? "阻止" : rule.action === "block_null" ? "阻止(0.0.0.0)" : rule.action === "block_nxdomain" ? "阻止(NX)" : rule.action === "forward" ? `转发 → ${rule.target || "默认"}` : "缓存"}
                     </span>
                   </td>
                   <td className="p-3 text-sm">{rule.priority}</td>

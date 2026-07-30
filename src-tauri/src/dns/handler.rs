@@ -328,7 +328,13 @@ impl DnsHandler {
 
         // ① 自定义规则（最高优先级，覆盖一切订阅）
         let rule_result = self.check_rules(&query_name);
+        let is_whitelisted = rule_result.as_ref().map_or(false, |(action, _, _)| *action == RuleAction::Allow);
         let mut forward_group: Option<String> = match rule_result {
+            Some((RuleAction::Allow, _, _)) => {
+                // 白名单规则，跳过黑名单检查，直接放行
+                debug!("白名单放行: {}", query_name);
+                None
+            }
             Some((RuleAction::Block, _, _)) | Some((RuleAction::BlockNull, _, _)) => {
                 let config = self.config.lock().unwrap();
                 self.record_blocked(&query_name, &format!("{:?}", query_type), "rule", start);
@@ -338,12 +344,12 @@ impl DnsHandler {
                 self.record_blocked(&query_name, &format!("{:?}", query_type), "rule:nxdomain", start);
                 return Some(self.create_nxdomain_response(&query));
             }
-            Some((RuleAction::Forward, _, target)) => target,
+            Some((RuleAction::Forward, _, ref target)) => target.clone(),
             _ => None,
         };
 
-        // ② 黑名单订阅（自定义规则未命中时生效）
-        if forward_group.is_none() && self.is_blocked(&query_name) {
+        // ② 黑名单订阅（自定义规则未命中或为白名单时跳过）
+        if !is_whitelisted && forward_group.is_none() && self.is_blocked(&query_name) {
             let config = self.config.lock().unwrap();
             self.record_blocked(&query_name, &format!("{:?}", query_type), "blocklist", start);
             return Some(self.create_blocked_response(&query, &config.proxy.listen_address));
