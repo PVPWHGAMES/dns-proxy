@@ -11,7 +11,7 @@ export default function About() {
           </div>
         </div>
         <h1 className="text-2xl font-bold mb-1">DNS Proxy</h1>
-        <p className="text-muted-foreground mb-3">版本 1.0.7</p>
+        <p className="text-muted-foreground mb-3">版本 1.0.8</p>
         <p className="text-sm text-muted-foreground max-w-md mx-auto">
           一个类似 YogaDNS 的 Windows 全局 DNS 代理软件，支持国内外域名分流、GeoSite 路由、广告拦截。
         </p>
