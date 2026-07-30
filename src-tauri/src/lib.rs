@@ -658,13 +658,20 @@ pub fn run() {
                     config.tun.enabled
                 };
                 if tun_enabled {
+                    // 等待 DNS 服务启动完成
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+                    // 设置启动中状态
+                    {
+                        let state = app_handle_tun.state::<AppState>();
+                        let mut starting = state.tun_starting.lock().await;
+                        *starting = true;
+                    }
+
                     let state = app_handle_tun.state::<AppState>();
                     let tun_config = state.tun_config.lock().await.clone();
-                    drop(tun_config);
 
                     let mut tun = state.tun_device.lock().await;
-                    let tun_config = state.tun_config.lock().await.clone();
                     *tun = TunDevice::new(tun_config);
                     match tun.start().await {
                         Ok(()) => {
@@ -679,6 +686,13 @@ pub fn run() {
                         Err(e) => {
                             tracing::error!("自动启动TUN失败: {}", e);
                         }
+                    }
+
+                    // 清除启动中状态
+                    {
+                        let state = app_handle_tun.state::<AppState>();
+                        let mut starting = state.tun_starting.lock().await;
+                        *starting = false;
                     }
                 }
             });
