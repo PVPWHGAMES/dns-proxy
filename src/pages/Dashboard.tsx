@@ -122,16 +122,29 @@ export default function Dashboard() {
   // 启动/停止 TUN
   const toggleTun = async () => {
     setTunLoading(true);
+
+    // 立即显示启动中状态
+    if (!tunStatus.active) {
+      setTunStatus(prev => ({ ...prev, starting: true }));
+    }
+
     try {
       if (tunStatus.active) {
         await api.stopTun();
       } else {
         await api.startTun();
       }
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      await refreshStatus();
+      // 持续刷新直到状态稳定
+      for (let i = 0; i < 10; i++) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+        await refreshStatus();
+        // 如果状态已经不是启动中，可以提前退出
+        if (!tunStatus.starting && tunStatus.active) break;
+      }
     } catch (e) {
       alert("TUN 操作失败: " + e);
+      // 出错时刷新真实状态
+      await refreshStatus();
     } finally {
       setTunLoading(false);
     }
