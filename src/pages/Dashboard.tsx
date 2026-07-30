@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { api, DnsStats, DnsQueryLog, AppConfig, TrafficStats, CacheStats } from "../lib/api";
+import { api, DnsStats, DnsQueryLog, AppConfig, TrafficStats, CacheStats, TunStatus } from "../lib/api";
 import {
   Activity,
   Server,
@@ -11,6 +11,8 @@ import {
   Square,
   Loader2,
   BarChart3,
+  Wifi,
+  Power,
 } from "lucide-react";
 import {
   AreaChart,
@@ -40,23 +42,34 @@ export default function Dashboard() {
   const [trafficStats, setTrafficStats] = useState<TrafficStats | null>(null);
   const [cacheStats, setCacheStats] = useState<CacheStats | null>(null);
   const [loading, setLoading] = useState(false);
+  const [tunLoading, setTunLoading] = useState(false);
   const [initializing, setInitializing] = useState(true);
+  const [tunStatus, setTunStatus] = useState<TunStatus>({
+    active: false,
+    starting: false,
+    interface_name: "",
+    ip_address: "",
+    dns_redirected: false,
+    packets_processed: 0,
+  });
 
   // 刷新状态
   const refreshStatus = useCallback(async () => {
     try {
-      const [newStats, newLogs, newConfig, newTrafficStats, newCacheStats] = await Promise.all([
+      const [newStats, newLogs, newConfig, newTrafficStats, newCacheStats, newTunStatus] = await Promise.all([
         api.getStats(),
         api.getLogs(),
         api.getConfig(),
         api.getTrafficStats(),
         api.getCacheStats(),
+        api.getTunStatus().catch(() => ({ active: false, starting: false, interface_name: "", ip_address: "", dns_redirected: false, packets_processed: 0 })),
       ]);
       setStats(newStats);
       setLogs(newLogs.slice(0, 10));
       setConfig(newConfig);
       setTrafficStats(newTrafficStats);
       setCacheStats(newCacheStats);
+      setTunStatus(newTunStatus);
     } catch (e) {
       console.error("获取状态失败:", e);
     } finally {
@@ -106,6 +119,24 @@ export default function Dashboard() {
     }
   };
 
+  // 启动/停止 TUN
+  const toggleTun = async () => {
+    setTunLoading(true);
+    try {
+      if (tunStatus.active) {
+        await api.stopTun();
+      } else {
+        await api.startTun();
+      }
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      await refreshStatus();
+    } catch (e) {
+      alert("TUN 操作失败: " + e);
+    } finally {
+      setTunLoading(false);
+    }
+  };
+
   if (initializing) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -117,53 +148,123 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6">
-      {/* 启动控制卡片 */}
-      <div className="bg-card rounded-xl border p-6">
-        <div className="flex items-center justify-between">
-          <div>
-            <h3 className="text-lg font-semibold">DNS 代理服务</h3>
-            <p className="text-sm text-muted-foreground">
-              {stats.is_running ? "服务正在运行，监听端口 53" : "服务未启动"}
-            </p>
+      {/* 服务控制卡片 */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {/* DNS 代理服务 */}
+        <div className="bg-card rounded-xl border p-6">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-lg font-semibold">DNS 代理服务</h3>
+              <p className="text-sm text-muted-foreground">
+                {stats.is_running ? `运行中 · 监听端口 ${config?.proxy.listen_port || 53}` : "服务未启动"}
+              </p>
+            </div>
+            <button
+              onClick={toggleService}
+              disabled={loading}
+              className={`
+                flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all text-sm
+                ${
+                  stats.is_running
+                    ? "bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                    : "bg-primary text-primary-foreground hover:bg-primary/90"
+                }
+                ${loading ? "opacity-70 cursor-wait" : ""}
+              `}
+            >
+              {loading ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  处理中
+                </>
+              ) : stats.is_running ? (
+                <>
+                  <Square className="w-4 h-4" />
+                  停止
+                </>
+              ) : (
+                <>
+                  <Play className="w-4 h-4" />
+                  启动
+                </>
+              )}
+            </button>
           </div>
-          <button
-            onClick={toggleService}
-            disabled={loading}
-            className={`
-              flex items-center gap-2 px-6 py-3 rounded-lg font-medium transition-all
-              ${
-                stats.is_running
-                  ? "bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                  : "bg-primary text-primary-foreground hover:bg-primary/90"
-              }
-              ${loading ? "opacity-70 cursor-wait" : ""}
-            `}
-          >
-            {loading ? (
-              <>
-                <Loader2 className="w-5 h-5 animate-spin" />
-                处理中...
-              </>
-            ) : stats.is_running ? (
-              <>
-                <Square className="w-5 h-5" />
-                停止服务
-              </>
-            ) : (
-              <>
-                <Play className="w-5 h-5" />
-                启动服务
-              </>
-            )}
-          </button>
+
+          {stats.is_running && (
+            <div className="mt-3 flex items-center gap-2 text-sm text-green-600">
+              <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+              <span>DNS 服务正常运行</span>
+            </div>
+          )}
         </div>
 
-        {stats.is_running && (
-          <div className="mt-4 flex items-center gap-2 text-sm text-green-600">
-            <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-            <span>运行中</span>
+        {/* TUN 服务 */}
+        <div className="bg-card rounded-xl border p-6">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-lg font-semibold flex items-center gap-2">
+                <Wifi className="w-5 h-5" />
+                TUN 模式
+              </h3>
+              <p className="text-sm text-muted-foreground">
+                {tunStatus.active
+                  ? `运行中 · ${tunStatus.interface_name}`
+                  : tunStatus.starting
+                  ? "启动中..."
+                  : "未启用"}
+              </p>
+            </div>
+            <button
+              onClick={toggleTun}
+              disabled={tunLoading || tunStatus.starting}
+              className={`
+                flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all text-sm
+                ${
+                  tunStatus.active
+                    ? "bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                    : "bg-primary text-primary-foreground hover:bg-primary/90"
+                }
+                ${tunLoading || tunStatus.starting ? "opacity-70 cursor-wait" : ""}
+              `}
+            >
+              {tunLoading || tunStatus.starting ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  {tunStatus.starting ? "启动中" : "处理中"}
+                </>
+              ) : tunStatus.active ? (
+                <>
+                  <Power className="w-4 h-4" />
+                  停止
+                </>
+              ) : (
+                <>
+                  <Zap className="w-4 h-4" />
+                  启动
+                </>
+              )}
+            </button>
           </div>
-        )}
+
+          {tunStatus.active && (
+            <div className="mt-3 flex items-center gap-4 text-sm">
+              <div className="flex items-center gap-2 text-green-600">
+                <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                <span>TUN 正常运行</span>
+              </div>
+              {tunStatus.ip_address && (
+                <span className="text-muted-foreground">IP: {tunStatus.ip_address}</span>
+              )}
+            </div>
+          )}
+
+          {!tunStatus.active && !tunStatus.starting && (
+            <div className="mt-3 text-xs text-muted-foreground">
+              在「网络设置」页面配置 TUN 参数
+            </div>
+          )}
+        </div>
       </div>
 
       {/* 统计卡片 */}

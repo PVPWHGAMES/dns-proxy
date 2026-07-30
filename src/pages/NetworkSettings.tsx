@@ -1,19 +1,10 @@
 import { useState, useEffect } from "react";
 import {
-  Wifi,
   Shield,
   Settings,
-  CheckCircle,
-  AlertCircle,
-  Monitor,
-  Power,
-  Zap,
   Loader2,
 } from "lucide-react";
-import { api, TunConfig, TunStatus } from "../lib/api";
-
-// 兼容 NodeJS.Timeout 类型
-type TimerHandle = ReturnType<typeof setInterval>;
+import { api, TunConfig } from "../lib/api";
 
 export default function NetworkSettings() {
   const [loading, setLoading] = useState(false);
@@ -26,41 +17,10 @@ export default function NetworkSettings() {
     dns_servers: ["10.10.0.1"],
     auto_route: true,
   });
-  const [tunStatus, setTunStatus] = useState<TunStatus>({
-    active: false,
-    starting: false,
-    interface_name: "",
-    ip_address: "",
-    dns_redirected: false,
-    packets_processed: 0,
-  });
   const [initializing, setInitializing] = useState(true);
 
   useEffect(() => {
     loadConfig();
-
-    // 初始加载时更频繁地轮询（每500ms），直到状态稳定
-    let fastInterval: TimerHandle | null = null;
-    let normalInterval: TimerHandle | null = null;
-    let checkCount = 0;
-
-    // 快速轮询阶段：前10秒每500ms检查一次
-    fastInterval = setInterval(async () => {
-      await refreshStatus();
-      checkCount++;
-
-      // 10秒后（20次）切换到正常轮询
-      if (checkCount >= 20) {
-        if (fastInterval) clearInterval(fastInterval);
-        fastInterval = null;
-        normalInterval = setInterval(refreshStatus, 2000);
-      }
-    }, 500);
-
-    return () => {
-      if (fastInterval) clearInterval(fastInterval);
-      if (normalInterval) clearInterval(normalInterval);
-    };
   }, []);
 
   const loadConfig = async () => {
@@ -74,50 +34,9 @@ export default function NetworkSettings() {
     }
   };
 
-  const refreshStatus = async () => {
-    try {
-      const status = await api.getTunStatus();
-      setTunStatus(status);
-    } catch (e) {
-      // 忽略
-    }
-  };
-
-  const handleStartTun = async () => {
-    setLoading(true);
-    setMessage(null);
-    try {
-      // 先保存配置
-      await api.saveTunConfig({ ...tunConfig, enabled: true });
-      // 启动TUN
-      const result = await api.startTun();
-      setMessage({ type: "success", text: result });
-      // 等待一下再刷新
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      await refreshStatus();
-    } catch (e) {
-      setMessage({ type: "error", text: "启动TUN失败: " + e });
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleStopTun = async () => {
-    setLoading(true);
-    try {
-      const result = await api.stopTun();
-      setMessage({ type: "success", text: result });
-      await new Promise(resolve => setTimeout(resolve, 500));
-      await refreshStatus();
-    } catch (e) {
-      setMessage({ type: "error", text: "停止TUN失败: " + e });
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const handleSaveConfig = async () => {
     setLoading(true);
+    setMessage(null);
     try {
       await api.saveTunConfig(tunConfig);
       setMessage({ type: "success", text: "配置已保存" });
@@ -153,88 +72,12 @@ export default function NetworkSettings() {
         </div>
       )}
 
-      {/* 当前状态 */}
-      <div className="bg-card rounded-xl border">
-        <div className="p-4 border-b flex items-center gap-2">
-          <Monitor className="w-5 h-5 text-primary" />
-          <h3 className="font-semibold">TUN 状态</h3>
-        </div>
-        <div className="p-4">
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div className="p-3 bg-muted rounded-lg">
-              <p className="text-sm text-muted-foreground">TUN状态</p>
-              <div className="flex items-center gap-2 mt-1">
-                {tunStatus.starting ? (
-                  <>
-                    <Loader2 className="w-4 h-4 animate-spin text-yellow-500" />
-                    <p className="font-medium text-yellow-600">启动中...</p>
-                  </>
-                ) : tunStatus.active ? (
-                  <>
-                    <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-                    <p className="font-medium text-green-600">运行中</p>
-                  </>
-                ) : (
-                  <>
-                    <div className="w-2 h-2 rounded-full bg-gray-400" />
-                    <p className="font-medium">未启动</p>
-                  </>
-                )}
-              </div>
-            </div>
-            <div className="p-3 bg-muted rounded-lg">
-              <p className="text-sm text-muted-foreground">网卡名称</p>
-              <p className="font-mono mt-1">{tunStatus.interface_name || "-"}</p>
-            </div>
-            <div className="p-3 bg-muted rounded-lg">
-              <p className="text-sm text-muted-foreground">IP地址</p>
-              <p className="font-mono mt-1">{tunStatus.ip_address || "-"}</p>
-            </div>
-          </div>
-        </div>
-      </div>
-
       {/* TUN配置 */}
       <div className="bg-card rounded-xl border">
         <div className="p-4 border-b flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Shield className="w-5 h-5 text-primary" />
             <h3 className="font-semibold">TUN 配置</h3>
-          </div>
-          <div className="flex items-center gap-2">
-            {tunStatus.active ? (
-              <button
-                onClick={handleStopTun}
-                disabled={loading || tunStatus.starting}
-                className="flex items-center gap-2 px-4 py-2 text-sm bg-destructive text-destructive-foreground rounded-lg hover:bg-destructive/90 disabled:opacity-50"
-              >
-                {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Power className="w-4 h-4" />}
-                {loading ? "处理中..." : "停止TUN"}
-              </button>
-            ) : (
-              <button
-                onClick={handleStartTun}
-                disabled={loading || tunStatus.starting}
-                className="flex items-center gap-2 px-4 py-2 text-sm bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 disabled:opacity-50"
-              >
-                {tunStatus.starting ? (
-                  <>
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    启动中...
-                  </>
-                ) : loading ? (
-                  <>
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    处理中...
-                  </>
-                ) : (
-                  <>
-                    <Zap className="w-4 h-4" />
-                    启动TUN
-                  </>
-                )}
-              </button>
-            )}
           </div>
         </div>
 
@@ -301,7 +144,7 @@ export default function NetworkSettings() {
             disabled={loading}
             className="flex items-center gap-2 px-4 py-2 text-sm border rounded-lg hover:bg-muted disabled:opacity-50"
           >
-            <Settings className="w-4 h-4" />
+            {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Settings className="w-4 h-4" />}
             保存配置
           </button>
         </div>
@@ -315,6 +158,7 @@ export default function NetworkSettings() {
           <p>• 需要管理员权限运行</p>
           <p>• 首次使用需要安装WinTun驱动</p>
           <p>• 启动后系统DNS会自动设置为127.0.0.1</p>
+          <p>• TUN 状态和启动按钮在首页「DNS 代理服务」卡片中</p>
         </div>
       </div>
     </div>
