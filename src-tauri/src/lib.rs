@@ -500,12 +500,15 @@ pub fn run() {
     let latency_results = Arc::new(Mutex::new(Vec::new()));
     let latency_last_test = Arc::new(Mutex::new(None));
 
+    // 如果 TUN 配置为启用，初始化时就设置启动中状态
+    let tun_starting = Arc::new(Mutex::new(tun_config.enabled));
+
     let state = AppState {
         server: Arc::new(Mutex::new(server)),
         config: Arc::new(Mutex::new(config)),
         tun_device: Arc::new(Mutex::new(tun_device)),
         tun_config: Arc::new(Mutex::new(tun_config)),
-        tun_starting: Arc::new(Mutex::new(false)),
+        tun_starting,
         latency_results: latency_results.clone(),
         latency_last_test: latency_last_test.clone(),
     };
