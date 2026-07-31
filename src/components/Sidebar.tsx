@@ -74,7 +74,7 @@ export default function Sidebar() {
           </div>
           <div>
             <h1 className="font-bold text-lg">DNS Proxy</h1>
-            <p className="text-xs text-muted-foreground">v1.0.8</p>
+            <p className="text-xs text-muted-foreground">v1.0.9</p>
           </div>
         </div>
       </div>
