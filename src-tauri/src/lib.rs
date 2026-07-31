@@ -4,7 +4,7 @@ mod tun;
 
 use config::AppConfig;
 use dns::server::DnsServer;
-use dns::{CacheStats, DnsQueryLog, DnsStats, TrafficStats};
+use dns::{CacheStats, DnsQueryLog, DnsStats, PoolStats, TrafficStats};
 use std::sync::Arc;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -116,6 +116,40 @@ async fn get_traffic_stats(state: State<'_, AppState>) -> Result<TrafficStats, S
 async fn get_cache_stats(state: State<'_, AppState>) -> Result<CacheStats, String> {
     let server = state.server.lock().await;
     Ok(server.get_cache_stats())
+}
+
+#[tauri::command]
+async fn get_pool_stats(state: State<'_, AppState>) -> Result<PoolStats, String> {
+    let server = state.server.lock().await;
+    Ok(server.get_pool_stats())
+}
+
+/// 应用内存占用信息
+#[derive(Debug, Clone, serde::Serialize)]
+struct MemoryInfo {
+    /// 物理内存 (MB)
+    memory_mb: f64,
+    /// 虚拟内存 (MB)
+    virtual_memory_mb: f64,
+}
+
+/// 获取当前进程的内存占用
+#[tauri::command]
+fn get_memory_usage() -> Result<MemoryInfo, String> {
+    use sysinfo::{Pid, System};
+
+    let pid = std::process::id();
+    let mut system = System::new_all();
+    system.refresh_all();
+
+    let pid = Pid::from_u32(pid);
+    system
+        .process(pid)
+        .map(|p| MemoryInfo {
+            memory_mb: p.memory() as f64 / (1024.0 * 1024.0),
+            virtual_memory_mb: p.virtual_memory() as f64 / (1024.0 * 1024.0),
+        })
+        .ok_or_else(|| "无法获取进程信息".to_string())
 }
 
 #[tauri::command]
@@ -277,6 +311,154 @@ async fn get_latency_results(state: State<'_, AppState>) -> Result<(Vec<DnsLaten
     let results = state.latency_results.lock().await.clone();
     let last_test = state.latency_last_test.lock().await.clone();
     Ok((results, last_test))
+}
+
+/// 检查更新信息
+#[derive(serde::Serialize, Clone)]
+struct UpdateInfo {
+    has_update: bool,
+    current_version: String,
+    latest_version: String,
+    release_url: String,
+    release_notes: String,
+    published_at: String,
+}
+
+/// 检查 GitHub 是否有新版本
+/// 检查程序是否已注册开机自启动
+#[tauri::command]
+fn is_autostart_enabled() -> Result<bool, String> {
+    use winreg::enums::*;
+    let hkcu = winreg::RegKey::predef(HKEY_CURRENT_USER);
+    let run_key = hkcu
+        .open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Run")
+        .map_err(|e| format!("无法读取注册表: {}", e))?;
+    let value: Option<String> = run_key.get_value("DNSProxy").ok();
+    Ok(value.is_some())
+}
+
+/// 设置或取消开机自启动
+#[tauri::command]
+fn set_autostart(enabled: bool) -> Result<(), String> {
+    use winreg::enums::*;
+    let hkcu = winreg::RegKey::predef(HKEY_CURRENT_USER);
+    let (run_key, _) = hkcu
+        .create_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Run")
+        .map_err(|e| format!("无法写入注册表: {}", e))?;
+    if enabled {
+        let exe_path = std::env::current_exe().map_err(|e| format!("无法获取程序路径: {}", e))?;
+        let path_str = exe_path.to_string_lossy();
+        // 路径包含空格时需要用引号包裹
+        let value = format!("\"{}\"", path_str.replace('"', ""));
+        run_key
+            .set_value("DNSProxy", &value)
+            .map_err(|e| format!("设置自启动失败: {}", e))?;
+    } else {
+        // 删除键值（忽略键不存在的错误）
+        let _ = run_key.delete_value("DNSProxy");
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn check_update() -> Result<UpdateInfo, String> {
+    let current_version = env!("CARGO_PKG_VERSION").to_string();
+
+    // 调用 GitHub API 获取最新 release（支持系统代理）
+    let mut builder = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .user_agent("dns-proxy")
+        .danger_accept_invalid_certs(false);
+
+    // 尝试使用系统代理
+    if let Ok(proxy_url) = std::env::var("HTTP_PROXY").or_else(|_| std::env::var("http_proxy")) {
+        if let Ok(proxy) = reqwest::Proxy::http(&proxy_url) {
+            builder = builder.proxy(proxy);
+        }
+    }
+    if let Ok(proxy_url) = std::env::var("HTTPS_PROXY").or_else(|_| std::env::var("https_proxy")) {
+        if let Ok(proxy) = reqwest::Proxy::https(&proxy_url) {
+            builder = builder.proxy(proxy);
+        }
+    }
+
+    let client = builder
+        .build()
+        .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
+
+    let url = "https://api.github.com/repos/PVPWHGAMES/dns-proxy/releases/latest";
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("请求 GitHub API 失败，请检查网络连接或代理设置: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("GitHub API 返回错误: {}", response.status()));
+    }
+
+    let release: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("解析响应失败: {}", e))?;
+
+    let latest_version = release["tag_name"]
+        .as_str()
+        .unwrap_or("v0.0.0")
+        .trim_start_matches('v')
+        .to_string();
+
+    let release_url = release["html_url"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+
+    let release_notes = release["body"]
+        .as_str()
+        .unwrap_or("无更新说明")
+        .to_string();
+
+    let published_at = release["published_at"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+
+    // 比较版本号
+    let has_update = compare_versions(&current_version, &latest_version);
+
+    Ok(UpdateInfo {
+        has_update,
+        current_version,
+        latest_version,
+        release_url,
+        release_notes,
+        published_at,
+    })
+}
+
+/// 比较版本号，如果 latest > current 返回 true
+fn compare_versions(current: &str, latest: &str) -> bool {
+    let parse_version = |v: &str| -> Vec<u32> {
+        v.split('.')
+            .filter_map(|s| s.parse().ok())
+            .collect()
+    };
+
+    let current_parts = parse_version(current);
+    let latest_parts = parse_version(latest);
+
+    for i in 0..std::cmp::max(current_parts.len(), latest_parts.len()) {
+        let c = current_parts.get(i).copied().unwrap_or(0);
+        let l = latest_parts.get(i).copied().unwrap_or(0);
+        if l > c {
+            return true;
+        }
+        if l < c {
+            return false;
+        }
+    }
+
+    false
 }
 
 async fn run_latency_test(servers: &[crate::config::DnsServer]) -> Vec<DnsLatencyResult> {
@@ -632,23 +814,16 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // 自动启动 DNS 服务
+            // 自动启动 DNS 服务（应用启动时始终启动）
             let app_handle_startup = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                let auto_start = {
-                    let state = app_handle_startup.state::<AppState>();
-                    let config = state.config.lock().await;
-                    config.proxy.auto_start
-                };
-                if auto_start {
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    let state = app_handle_startup.state::<AppState>();
-                    let mut server = state.server.lock().await;
-                    if let Err(e) = server.start().await {
-                        tracing::error!("自动启动DNS服务失败: {}", e);
-                    } else {
-                        tracing::info!("DNS服务已自动启动");
-                    }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                let state = app_handle_startup.state::<AppState>();
+                let mut server = state.server.lock().await;
+                if let Err(e) = server.start().await {
+                    tracing::error!("自动启动DNS服务失败: {}", e);
+                } else {
+                    tracing::info!("DNS服务已自动启动");
                 }
             });
 
@@ -843,13 +1018,18 @@ pub fn run() {
             update_subscriptions,
             get_traffic_stats,
             get_cache_stats,
+            get_pool_stats,
             get_tun_config,
             save_tun_config,
             start_tun,
             stop_tun,
             get_tun_status,
             test_dns_latency,
-            get_latency_results
+            get_latency_results,
+            check_update,
+            get_memory_usage,
+            is_autostart_enabled,
+            set_autostart
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

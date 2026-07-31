@@ -26,7 +26,6 @@ export interface ProxyConfig {
   protocol: string;
   cache_size: number;
   cache_ttl: number;
-  auto_start: boolean;
   block_ipv6: boolean;
   default_group: string;
 }
@@ -157,6 +156,17 @@ export interface CacheStats {
   max_size: number;
 }
 
+export interface PoolStats {
+  dot_idle_connections: number;
+  dot_hosts: number;
+  udp_channels: number;
+}
+
+export interface MemoryInfo {
+  memory_mb: number;
+  virtual_memory_mb: number;
+}
+
 export const api = {
   async getConfig(): Promise<AppConfig> {
     return await invoke("get_config");
@@ -202,6 +212,14 @@ export const api = {
     return await invoke("get_cache_stats");
   },
 
+  async getPoolStats(): Promise<PoolStats> {
+    return await invoke("get_pool_stats");
+  },
+
+  async getMemoryUsage(): Promise<MemoryInfo> {
+    return await invoke("get_memory_usage");
+  },
+
   async updateSubscriptions(): Promise<string> {
     return await invoke("update_subscriptions");
   },
@@ -233,5 +251,14 @@ export const api = {
 
   async getLatencyResults(): Promise<[DnsLatencyResult[], string | null]> {
     return await invoke("get_latency_results");
+  },
+
+  // 程序自启动（Windows 注册表）
+  async isAutostartEnabled(): Promise<boolean> {
+    return await invoke("is_autostart_enabled");
+  },
+
+  async setAutostart(enabled: boolean): Promise<void> {
+    return await invoke("set_autostart", { enabled });
   },
 };

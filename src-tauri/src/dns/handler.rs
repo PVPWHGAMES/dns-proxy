@@ -1,12 +1,13 @@
 use crate::config::{AppConfig, DnsProtocol, DnsStrategy, RuleAction, RuleType, Subscription, SubscriptionType};
 use crate::dns::cache::DnsCache;
 use crate::dns::ecs;
+use crate::dns::pool::DnsConnectionPool;
 use crate::dns::DnsQueryLog;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::net::UdpSocket;
+use tokio::sync::Mutex as AsyncMutex;
 use tracing::{info, warn, debug};
 use trust_dns_client::op::Message;
 use trust_dns_client::rr::{Record, RecordType, RData};
@@ -26,6 +27,18 @@ pub struct DnsHandler {
     public_ip: Arc<Mutex<Option<IpAddr>>>,  // 自动获取的公网 IP
     public_ip_last_update: Arc<Mutex<Option<Instant>>>,  // 上次更新时间
     traffic_stats: Arc<Mutex<TrafficStatsCollector>>,  // 流量统计收集器
+    /// 上游连接池（DoT 长连接 + UDP socket 复用）
+    pool: Arc<DnsConnectionPool>,
+    /// 请求合并：等待中的查询 (cache_key -> 追随者列表)
+    pending_queries: Arc<AsyncMutex<HashMap<String, PendingQueryState>>>,
+}
+
+/// 请求合并的进行中查询状态
+struct PendingQueryState {
+    /// 等待此查询结果的追随者
+    waiters: Vec<tokio::sync::oneshot::Sender<Option<Vec<u8>>>>,
+    /// 查询开始时间（用于清理过期条目）
+    started_at: Instant,
 }
 
 #[derive(Clone, Default)]
@@ -109,6 +122,12 @@ impl DnsHandler {
         let mut traffic_collector = TrafficStatsCollector::default();
         traffic_collector.start_time = Some(Instant::now());
 
+        // 创建上游连接池
+        let pool = Arc::new(DnsConnectionPool::new(
+            8,                              // 每主机最多 8 个空闲连接
+            Duration::from_secs(120),       // 空闲连接 120 秒过期
+        ));
+
         // 加载已有的订阅规则
         let handler = Self {
             config: Arc::new(Mutex::new(config.clone())),
@@ -124,6 +143,8 @@ impl DnsHandler {
             public_ip,
             public_ip_last_update,
             traffic_stats: Arc::new(Mutex::new(traffic_collector)),
+            pool,
+            pending_queries: Arc::new(AsyncMutex::new(HashMap::new())),
         };
 
         // 初始化黑名单和域名路由
@@ -362,6 +383,40 @@ impl DnsHandler {
             return cached.to_bytes().ok();
         }
 
+        // ④ 请求合并：避免相同域名+类型的并发查询重复请求上游
+        //    使用 Leader-Follower 模式：第一个查询成为 Leader 执行实际转发，
+        //    后续相同查询成为 Follower，等待 Leader 的结果
+        {
+            let mut pending = self.pending_queries.lock().await;
+            // 顺便清理过期条目（超过 10 秒未完成）
+            pending.retain(|_, state| state.started_at.elapsed() < Duration::from_secs(10));
+
+            if let Some(state) = pending.get_mut(&cache_key) {
+                // 已有进行中的查询，成为追随者
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                state.waiters.push(tx);
+                drop(pending);
+
+                // 等待领导者完成（5 秒超时）
+                match tokio::time::timeout(Duration::from_secs(5), rx).await {
+                    Ok(Ok(Some(response))) => {
+                        self.record_coalesced(&query_name, &format!("{:?}", query_type), start);
+                        return Some(response);
+                    }
+                    _ => {
+                        // 超时或领导者失败，向上返回 None
+                        return None;
+                    }
+                }
+            } else {
+                // 成为领导者，注册进行中查询
+                pending.insert(cache_key.clone(), PendingQueryState {
+                    waiters: Vec::new(),
+                    started_at: Instant::now(),
+                });
+            }
+        }
+
         // 自定义规则未指定分组时，检查 geosite 域名路由
         if forward_group.is_none() {
             forward_group = self.check_geosite(&query_name);
@@ -400,10 +455,9 @@ impl DnsHandler {
             let latency = start.elapsed().as_millis() as u64;
 
             // 缓存响应
-            let cache_key = format!("{}:{:?}", query_name, query_type);
             if let Ok(response_msg) = Message::from_bytes(response_bytes) {
                 let ttl = Duration::from_secs(self.config.lock().unwrap().proxy.cache_ttl);
-                self.cache.put(cache_key, response_msg, ttl);
+                self.cache.put(cache_key.clone(), response_msg, ttl);
             }
 
             self.record_success(
@@ -415,6 +469,9 @@ impl DnsHandler {
                 forward_group.as_deref().unwrap_or("default"),
             );
         }
+
+        // 通知所有等待中的追随者
+        self.notify_pending(&cache_key, response.clone()).await;
 
         response
     }
@@ -779,21 +836,7 @@ impl DnsHandler {
         port: u16,
     ) -> Option<Vec<u8>> {
         let addr = format!("{}:{}", ip, port);
-        let socket = UdpSocket::bind("0.0.0.0:0").await.ok()?;
-        socket.connect(&addr).await.ok()?;
-
-        socket.send(query_bytes).await.ok()?;
-
-        let mut buf = vec![0u8; 512];
-        let timeout = Duration::from_secs(2);
-
-        match tokio::time::timeout(timeout, socket.recv(&mut buf)).await {
-            Ok(Ok(len)) => Some(buf[..len].to_vec()),
-            _ => {
-                warn!("转发DNS查询超时: {}", addr);
-                None
-            }
-        }
+        self.pool.udp_query(&addr, query_bytes).await
     }
 
     async fn forward_doh(&self, query_bytes: &[u8], url: &str) -> Option<Vec<u8>> {
@@ -814,83 +857,55 @@ impl DnsHandler {
         }
     }
 
-    /// DoT (DNS-over-TLS) 转发
+    /// DoT (DNS-over-TLS) 转发（使用连接池复用 TLS 连接）
     async fn forward_dot(
         &self,
         query_bytes: &[u8],
         ip: &str,
         port: u16,
     ) -> Option<Vec<u8>> {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpStream;
-        use tokio_rustls::TlsConnector;
-
         let addr = format!("{}:{}", ip, port);
 
-        // 建立 TCP 连接
-        let tcp = match tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(&addr)).await {
-            Ok(Ok(stream)) => stream,
-            Ok(Err(e)) => {
-                warn!("DoT TCP连接失败 {}: {}", addr, e);
-                return None;
+        // 首次尝试：从连接池获取连接
+        // TODO: DoT 应使用主机名而非 IP 进行 TLS SNI 验证，需要在配置中添加 dot_hostname 字段
+        if let Some(mut tls) = self.pool.acquire_dot(&addr, ip).await {
+            if let Some(response) = self.do_dot_query(&mut tls, query_bytes).await {
+                self.pool.release_dot(&addr, tls);
+                return Some(response);
             }
-            Err(_) => {
-                warn!("DoT TCP连接超时: {}", addr);
-                return None;
-            }
-        };
+            // 池连接已失效，丢弃后创建新连接
+        }
 
-        // 配置 TLS
-        let mut root_store = rustls::RootCertStore::empty();
-        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        let config = rustls::ClientConfig::builder()
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
+        // 二次尝试：创建全新连接
+        let mut tls = self.pool.acquire_dot(&addr, ip).await?;
+        let response = self.do_dot_query(&mut tls, query_bytes).await;
+        if response.is_some() {
+            self.pool.release_dot(&addr, tls);
+        }
+        // 失败则丢弃连接（不归还）
+        response
+    }
 
-        let connector = TlsConnector::from(std::sync::Arc::new(config));
-
-        // TLS 握手
-        let domain = match rustls::pki_types::ServerName::try_from(ip.to_string()) {
-            Ok(d) => d,
-            Err(e) => {
-                warn!("DoT 无效域名 {}: {}", ip, e);
-                return None;
-            }
-        };
-
-        let mut tls = match tokio::time::timeout(Duration::from_secs(3), connector.connect(domain, tcp)).await {
-            Ok(Ok(stream)) => stream,
-            Ok(Err(e)) => {
-                warn!("DoT TLS握手失败 {}: {}", addr, e);
-                return None;
-            }
-            Err(_) => {
-                warn!("DoT TLS握手超时: {}", addr);
-                return None;
-            }
-        };
+    /// DoT 查询核心：在已建立的 TLS 连接上执行一次 DNS 查询
+    async fn do_dot_query(
+        &self,
+        tls: &mut tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
+        query_bytes: &[u8],
+    ) -> Option<Vec<u8>> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         // 发送 DNS 查询（DoT 使用 TCP 格式：2字节长度前缀 + 查询数据）
         let len = (query_bytes.len() as u16).to_be_bytes();
-        if let Err(e) = tls.write_all(&len).await {
-            warn!("DoT 发送长度失败: {}", e);
-            return None;
-        }
-        if let Err(e) = tls.write_all(query_bytes).await {
-            warn!("DoT 发送查询失败: {}", e);
-            return None;
-        }
+        tls.write_all(&len).await.ok()?;
+        tls.write_all(query_bytes).await.ok()?;
 
         // 读取响应长度
         let mut len_buf = [0u8; 2];
-        if let Err(e) = tls.read_exact(&mut len_buf).await {
-            warn!("DoT 读取响应长度失败: {}", e);
-            return None;
-        }
+        tls.read_exact(&mut len_buf).await.ok()?;
         let resp_len = u16::from_be_bytes(len_buf) as usize;
 
         if resp_len > 4096 {
-            warn!("DoT 响应长度异常: {}", resp_len);
+            warn!("[连接池] DoT 响应长度异常: {}", resp_len);
             return None;
         }
 
@@ -899,11 +914,11 @@ impl DnsHandler {
         match tokio::time::timeout(Duration::from_secs(3), tls.read_exact(&mut resp_buf)).await {
             Ok(Ok(_)) => Some(resp_buf),
             Ok(Err(e)) => {
-                warn!("DoT 读取响应失败: {}", e);
+                warn!("[连接池] DoT 读取响应失败: {}", e);
                 None
             }
             Err(_) => {
-                warn!("DoT 读取响应超时");
+                warn!("[连接池] DoT 读取响应超时");
                 None
             }
         }
@@ -1147,6 +1162,68 @@ impl DnsHandler {
     /// 清理过期缓存
     pub fn cleanup_expired_cache(&self) {
         self.cache.cleanup_expired();
+    }
+
+    /// 获取连接池统计信息
+    pub fn get_pool_stats(&self) -> crate::dns::pool::PoolStats {
+        self.pool.get_stats()
+    }
+
+    /// 清理过期的空闲连接（由后台定时任务调用）
+    pub fn cleanup_idle_connections(&self) {
+        self.pool.cleanup_idle();
+    }
+
+    /// 记录合并请求（请求合并命中）
+    fn record_coalesced(&self, domain: &str, qtype: &str, start: Instant) {
+        let mut stats = self.stats.lock().unwrap();
+        stats.total_queries += 1;
+
+        let mut counter = self.log_id_counter.lock().unwrap();
+        let id = *counter;
+        *counter += 1;
+
+        let log = DnsQueryLog {
+            id,
+            timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+            domain: domain.to_string(),
+            query_type: qtype.to_string(),
+            response: "coalesced".to_string(),
+            upstream: "coalesced".to_string(),
+            latency_ms: start.elapsed().as_millis() as u64,
+            action: "coalesced".to_string(),
+            group: String::new(),
+        };
+
+        if let Ok(mut logs) = self.logs.lock() {
+            logs.insert(0, log);
+            if logs.len() > 1000 {
+                logs.truncate(1000);
+            }
+        }
+
+        // 更新流量统计（合并的请求不计入延迟分布）
+        if let Ok(mut traffic) = self.traffic_stats.lock() {
+            traffic.record_to_bucket(false, false);
+            traffic.record_domain(domain);
+        }
+    }
+
+    /// 通知所有等待中的追随者（领导者完成查询后调用）
+    async fn notify_pending(&self, cache_key: &str, response: Option<Vec<u8>>) {
+        if let Some(state) = self.pending_queries.lock().await.remove(cache_key) {
+            if !state.waiters.is_empty() {
+                debug!(
+                    "请求合并: {} 通知 {} 个追随者 (成功={})",
+                    cache_key,
+                    state.waiters.len(),
+                    response.is_some()
+                );
+            }
+            for waiter in state.waiters {
+                let _ = waiter.send(response.clone());
+            }
+        }
     }
 }
 

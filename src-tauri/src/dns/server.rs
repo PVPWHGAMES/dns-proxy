@@ -136,6 +136,28 @@ impl DnsServer {
             });
         }
 
+        // 启动定期连接池维护（每 60 秒清理过期连接和缓存）
+        {
+            let handler_maint = self.handler.clone();
+            let running_maint = self.running.clone();
+
+            tokio::spawn(async move {
+                let interval = std::time::Duration::from_secs(60);
+                info!("连接池定期维护已启用，间隔: 60 秒");
+
+                loop {
+                    tokio::time::sleep(interval).await;
+
+                    if !*running_maint.lock().await {
+                        break;
+                    }
+
+                    handler_maint.cleanup_expired_cache();
+                    handler_maint.cleanup_idle_connections();
+                }
+            });
+        }
+
         Ok(())
     }
 
@@ -225,6 +247,10 @@ impl DnsServer {
 
     pub fn get_cache_stats(&self) -> CacheStats {
         self.handler.get_cache_stats()
+    }
+
+    pub fn get_pool_stats(&self) -> crate::dns::pool::PoolStats {
+        self.handler.get_pool_stats()
     }
 
     pub fn cleanup_expired_cache(&self) {

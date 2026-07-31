@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { api, DnsStats, DnsQueryLog, AppConfig, TrafficStats, CacheStats, TunStatus } from "../lib/api";
+import { api, DnsStats, DnsQueryLog, AppConfig, TrafficStats, CacheStats, TunStatus, PoolStats, MemoryInfo } from "../lib/api";
 import {
   Activity,
   Server,
@@ -13,6 +13,8 @@ import {
   BarChart3,
   Wifi,
   Power,
+  Network,
+  Cpu,
 } from "lucide-react";
 import {
   AreaChart,
@@ -41,6 +43,8 @@ export default function Dashboard() {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [trafficStats, setTrafficStats] = useState<TrafficStats | null>(null);
   const [cacheStats, setCacheStats] = useState<CacheStats | null>(null);
+  const [poolStats, setPoolStats] = useState<PoolStats | null>(null);
+  const [memory, setMemory] = useState<MemoryInfo | null>(null);
   const [loading, setLoading] = useState(false);
   const [tunLoading, setTunLoading] = useState(false);
   const [initializing, setInitializing] = useState(true);
@@ -56,12 +60,14 @@ export default function Dashboard() {
   // 刷新状态
   const refreshStatus = useCallback(async () => {
     try {
-      const [newStats, newLogs, newConfig, newTrafficStats, newCacheStats, newTunStatus] = await Promise.all([
+      const [newStats, newLogs, newConfig, newTrafficStats, newCacheStats, newPoolStats, newMemory, newTunStatus] = await Promise.all([
         api.getStats(),
         api.getLogs(),
         api.getConfig(),
         api.getTrafficStats(),
         api.getCacheStats(),
+        api.getPoolStats().catch(() => null),
+        api.getMemoryUsage().catch(() => null),
         api.getTunStatus().catch(() => ({ active: false, starting: false, interface_name: "", ip_address: "", dns_redirected: false, packets_processed: 0 })),
       ]);
       setStats(newStats);
@@ -69,6 +75,8 @@ export default function Dashboard() {
       setConfig(newConfig);
       setTrafficStats(newTrafficStats);
       setCacheStats(newCacheStats);
+      setPoolStats(newPoolStats);
+      setMemory(newMemory);
       setTunStatus(newTunStatus);
     } catch (e) {
       console.error("获取状态失败:", e);
@@ -205,9 +213,24 @@ export default function Dashboard() {
           </div>
 
           {stats.is_running && (
-            <div className="mt-3 flex items-center gap-2 text-sm text-green-600">
-              <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-              <span>DNS 服务正常运行</span>
+            <div className="mt-3 flex items-center gap-4 text-sm">
+              <div className="flex items-center gap-2 text-green-600">
+                <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                <span>DNS 服务正常运行</span>
+              </div>
+              <button
+                onClick={async () => {
+                  try {
+                    await api.clearCache();
+                    await refreshStatus();
+                  } catch (e) {
+                    console.error("清空缓存失败:", e);
+                  }
+                }}
+                className="px-2 py-0.5 text-xs bg-muted hover:bg-muted/80 rounded transition-colors"
+              >
+                清空缓存
+              </button>
             </div>
           )}
         </div>
@@ -281,16 +304,23 @@ export default function Dashboard() {
       </div>
 
       {/* 统计卡片 */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
         <StatCard title="总查询数" value={stats.total_queries.toLocaleString()} icon={Activity} color="blue" />
         <StatCard title="阻止查询" value={stats.blocked_queries.toLocaleString()} icon={Shield} color="red" />
         <StatCard title="平均延迟" value={`${stats.avg_latency.toFixed(1)}ms`} icon={Zap} color="yellow" />
         <StatCard title="缓存命中" value={stats.cached_queries.toLocaleString()} icon={Server} color="green" />
+        <StatCard
+          title="内存占用"
+          value={memory ? `${memory.memory_mb.toFixed(0)} MB` : "-"}
+          icon={Cpu}
+          color="purple"
+        />
       </div>
 
       {/* 流量图表区域 */}
       {trafficStats && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <>
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
           {/* 请求量时间线 */}
           <div className="bg-card rounded-xl border p-4">
             <div className="flex items-center justify-between mb-4">
@@ -422,7 +452,12 @@ export default function Dashboard() {
             )}
           </div>
 
-          {/* 查询类型分布（新增） */}
+          </div>
+
+          {/* 统计卡片行 */}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+
+          {/* 查询统计 */}
           <div className="bg-card rounded-xl border p-4">
             <h3 className="font-semibold mb-4 flex items-center gap-2">
               <Activity className="w-5 h-5" />
@@ -484,7 +519,38 @@ export default function Dashboard() {
               </div>
             </div>
           )}
-        </div>
+
+          {/* 连接池统计 */}
+          {poolStats && (
+            <div className="bg-card rounded-xl border p-4">
+              <h3 className="font-semibold mb-4 flex items-center gap-2">
+                <Network className="w-5 h-5" />
+                连接池
+              </h3>
+              <div className="space-y-4">
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="text-center p-3 bg-muted/50 rounded-lg">
+                    <p className="text-2xl font-bold text-blue-600">{poolStats.udp_channels}</p>
+                    <p className="text-xs text-muted-foreground">UDP 通道</p>
+                  </div>
+                  <div className="text-center p-3 bg-muted/50 rounded-lg">
+                    <p className="text-2xl font-bold text-purple-600">{poolStats.dot_idle_connections}</p>
+                    <p className="text-xs text-muted-foreground">DoT 空闲</p>
+                  </div>
+                  <div className="text-center p-3 bg-muted/50 rounded-lg">
+                    <p className="text-2xl font-bold text-orange-600">{poolStats.dot_hosts}</p>
+                    <p className="text-xs text-muted-foreground">DoT 主机</p>
+                  </div>
+                </div>
+                <div className="text-xs text-muted-foreground text-center">
+                  空闲连接 120 秒自动回收
+                </div>
+              </div>
+            </div>
+          )}
+
+          </div>
+        </>
       )}
 
       {/* 最近查询 */}
@@ -548,9 +614,10 @@ export default function Dashboard() {
                       <span className={`px-2 py-1 rounded-full text-xs font-medium ${
                         log.action === "success" ? "bg-green-100 text-green-700" :
                         log.action === "blocked" ? "bg-red-100 text-red-700" :
+                        log.action === "coalesced" ? "bg-teal-100 text-teal-700" :
                         "bg-blue-100 text-blue-700"
                       }`}>
-                        {log.action === "success" ? "成功" : log.action === "blocked" ? "阻止" : "缓存"}
+                        {log.action === "success" ? "成功" : log.action === "blocked" ? "阻止" : log.action === "coalesced" ? "合并" : "缓存"}
                       </span>
                     </td>
                   </tr>
@@ -561,54 +628,6 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* 系统信息 */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div className="bg-card rounded-xl border p-4">
-          <h4 className="font-semibold mb-3">上游 DNS 服务器</h4>
-          <div className="space-y-2">
-            {config ? (
-              config.upstream.filter((s) => s.enabled).map((server, i) => (
-                <div key={i} className="flex items-center justify-between">
-                  <span className="text-muted-foreground text-sm">
-                    {server.name}
-                    <span className="ml-1.5 text-xs text-muted-foreground/60">({server.group || "default"})</span>
-                  </span>
-                  <span className="font-mono text-sm">{server.ip}:{server.port}</span>
-                </div>
-              ))
-            ) : (
-              <p className="text-sm text-muted-foreground">加载中...</p>
-            )}
-            {config && config.upstream.filter((s) => s.enabled).length === 0 && (
-              <p className="text-sm text-muted-foreground">无启用的服务器</p>
-            )}
-          </div>
-        </div>
-
-        <div className="bg-card rounded-xl border p-4">
-          <h4 className="font-semibold mb-3">系统信息</h4>
-          <div className="space-y-3 text-sm">
-            <InfoItem label="监听地址" value={config ? `${config.proxy.listen_address}:${config.proxy.listen_port}` : "-"} />
-            <InfoItem label="策略" value={config ? config.strategy : "-"} />
-            <InfoItem label="运行状态" value={stats.is_running ? "运行中" : "已停止"} />
-            <div className="pt-2">
-              <button
-                onClick={async () => {
-                  try {
-                    await api.clearCache();
-                    await refreshStatus();
-                  } catch (e) {
-                    console.error("清空缓存失败:", e);
-                  }
-                }}
-                className="px-3 py-1.5 text-sm bg-muted hover:bg-muted/80 rounded-md transition-colors"
-              >
-                清空 DNS 缓存
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
     </div>
   );
 }
@@ -621,6 +640,7 @@ function StatCard({ title, value, icon: Icon, color }: {
     red: "bg-red-50 text-red-600",
     yellow: "bg-yellow-50 text-yellow-600",
     green: "bg-green-50 text-green-600",
+    purple: "bg-purple-50 text-purple-600",
   };
 
   return (

@@ -2,6 +2,7 @@ pub mod server;
 pub mod handler;
 pub mod cache;
 pub mod ecs;
+pub mod pool;
 
 use serde::{Deserialize, Serialize};
 
@@ -33,3 +34,6 @@ pub use handler::{TrafficStats, TimeBucket, DomainStat, LatencyDistribution};
 
 // 重新导出缓存统计类型
 pub use cache::CacheStats;
+
+// 重新导出连接池统计类型
+pub use pool::PoolStats;

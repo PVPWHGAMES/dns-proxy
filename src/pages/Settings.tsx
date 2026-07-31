@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Save, Plus, Trash2, Server, Wifi, Database, Zap, RefreshCw, Timer } from "lucide-react";
+import { Save, Plus, Trash2, Server, Wifi, Database, Zap, RefreshCw, Timer, Monitor } from "lucide-react";
 import { api, AppConfig, DnsServer, DnsProtocol, DnsStrategy, DnsLatencyResult, ServerGroup } from "../lib/api";
 
 export default function Settings() {
@@ -10,12 +10,34 @@ export default function Settings() {
   const [latencyResults, setLatencyResults] = useState<DnsLatencyResult[]>([]);
   const [testingLatency, setTestingLatency] = useState(false);
   const [lastTestTime, setLastTestTime] = useState<string | null>(null);
+  const [autostartEnabled, setAutostartEnabled] = useState(false);
 
   // 加载配置
   useEffect(() => {
     loadConfig();
     loadLatencyResults();
+    loadAutostartStatus();
   }, []);
+
+  const loadAutostartStatus = async () => {
+    try {
+      const enabled = await api.isAutostartEnabled();
+      setAutostartEnabled(enabled);
+    } catch (e) {
+      console.error("加载自启动状态失败:", e);
+    }
+  };
+
+  const handleToggleAutostart = async () => {
+    const newState = !autostartEnabled;
+    try {
+      await api.setAutostart(newState);
+      setAutostartEnabled(newState);
+      setMessage({ type: "success", text: newState ? "已启用开机自启动" : "已取消开机自启动" });
+    } catch (e) {
+      setMessage({ type: "error", text: "设置自启动失败: " + e });
+    }
+  };
 
   const loadConfig = async () => {
     setLoading(true);
@@ -249,21 +271,16 @@ export default function Settings() {
           </div>
 
           <div className="space-y-3">
-            <label className="flex items-center gap-3 cursor-pointer">
+            <label className="flex items-center gap-3 cursor-pointer" onClick={handleToggleAutostart}>
               <input
                 type="checkbox"
-                checked={config.proxy.auto_start}
-                onChange={(e) =>
-                  setConfig({
-                    ...config,
-                    proxy: { ...config.proxy, auto_start: e.target.checked },
-                  })
-                }
+                checked={autostartEnabled}
+                onChange={handleToggleAutostart}
                 className="w-4 h-4"
               />
               <div>
                 <p className="text-sm font-medium">开机自启动</p>
-                <p className="text-xs text-muted-foreground">Windows 启动时自动运行</p>
+                <p className="text-xs text-muted-foreground">Windows 启动时自动运行 DNS Proxy</p>
               </div>
             </label>
             <label className="flex items-center gap-3 cursor-pointer">

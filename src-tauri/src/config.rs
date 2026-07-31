@@ -77,7 +77,6 @@ pub struct ProxyConfig {
     pub protocol: String,
     pub cache_size: usize,
     pub cache_ttl: u64,
-    pub auto_start: bool,
     pub block_ipv6: bool,
     /// 默认分组：未匹配任何规则时使用，空字符串表示使用所有服务器
     #[serde(default = "default_default_group")]
@@ -194,7 +193,6 @@ impl Default for AppConfig {
                 protocol: "both".to_string(),
                 cache_size: 1000,
                 cache_ttl: 300,
-                auto_start: false,
                 block_ipv6: false,
                 default_group: "domestic".to_string(),
             },
