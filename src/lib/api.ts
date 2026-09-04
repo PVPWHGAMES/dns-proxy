@@ -254,6 +254,10 @@ export const api = {
     return await invoke("get_latency_results");
   },
 
+  async downloadAndInstall(url: string, sha256: string): Promise<string> {
+    return await invoke("download_and_install", { url, sha256 });
+  },
+
   // 程序自启动（Windows 注册表）
   async isAutostartEnabled(): Promise<boolean> {
     return await invoke("is_autostart_enabled");

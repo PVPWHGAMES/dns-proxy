@@ -389,17 +389,32 @@ impl DnsHandler {
             return Some(self.create_blocked_response(&query, &config.proxy.listen_address));
         }
 
-        // ③ 缓存
-        let cache_key = format!("{}:{:?}", query_name, query_type);
-        if let Some(cached) = self.cache.get(&cache_key) {
-            self.record_cached(&query_name, &format!("{:?}", query_type), start);
-            return cached.to_bytes().ok();
+        // 自定义规则未指定分组时，检查 geosite 域名路由
+        if forward_group.is_none() {
+            forward_group = self.check_geosite(&query_name);
         }
 
-        // ④ 请求合并：避免相同域名+类型的并发查询重复请求上游
-        //    使用 Leader-Follower 模式：第一个查询成为 Leader 执行实际转发，
-        //    后续相同查询成为 Follower，等待 Leader 的结果
-        {
+        // 仍未命中时，使用默认分组
+        if forward_group.is_none() {
+            let default_group = self.config.lock().unwrap().proxy.default_group.clone();
+            if !default_group.is_empty() {
+                forward_group = Some(default_group);
+            }
+        }
+
+        let is_proxy_request = forward_group.as_deref() == Some("proxy");
+        let cache_key = format!("{}:{:?}", query_name, query_type);
+
+        // 代理请求交给代理软件每次重新解析，不读取缓存
+        if !is_proxy_request {
+            if let Some(cached) = self.cache.get(&cache_key) {
+                self.record_cached(&query_name, &format!("{:?}", query_type), start);
+                return cached.to_bytes().ok();
+            }
+        }
+
+        // 直连请求合并并发查询，代理请求每次都交给代理软件
+        if !is_proxy_request {
             let mut pending = self.pending_queries.lock().await;
             // 顺便清理过期条目（超过 10 秒未完成）
             pending.retain(|_, state| state.started_at.elapsed() < Duration::from_secs(10));
@@ -433,19 +448,6 @@ impl DnsHandler {
             }
         }
 
-        // 自定义规则未指定分组时，检查 geosite 域名路由
-        if forward_group.is_none() {
-            forward_group = self.check_geosite(&query_name);
-        }
-
-        // 仍未命中时，使用默认分组
-        if forward_group.is_none() {
-            let default_group = self.config.lock().unwrap().proxy.default_group.clone();
-            if !default_group.is_empty() {
-                forward_group = Some(default_group);
-            }
-        }
-
         // 根据策略选择DNS服务器并转发（如有指定分组则过滤）
         let (response, server_name) = if let Some(ref group) = forward_group {
             self.forward_with_strategy_for_group(query_bytes, group)
@@ -467,10 +469,12 @@ impl DnsHandler {
 
             let latency = start.elapsed().as_millis() as u64;
 
-            // 缓存响应
-            if let Ok(response_msg) = Message::from_bytes(response_bytes) {
-                let ttl = Duration::from_secs(self.config.lock().unwrap().proxy.cache_ttl);
-                self.cache.put(cache_key.clone(), response_msg, ttl);
+            // 代理请求不写入缓存，避免污染直连结果
+            if !is_proxy_request {
+                if let Ok(response_msg) = Message::from_bytes(response_bytes) {
+                    let ttl = Duration::from_secs(self.config.lock().unwrap().proxy.cache_ttl);
+                    self.cache.put(cache_key.clone(), response_msg, ttl);
+                }
             }
 
             self.record_success(
@@ -484,7 +488,9 @@ impl DnsHandler {
         }
 
         // 通知所有等待中的追随者
-        self.notify_pending(&cache_key, response.clone()).await;
+        if !is_proxy_request {
+            self.notify_pending(&cache_key, response.clone()).await;
+        }
 
         response
     }

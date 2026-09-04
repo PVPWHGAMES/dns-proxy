@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{Manager, State};
+use tauri::{AppHandle, Manager, State};
 use tokio::sync::Mutex;
 use tracing_subscriber::prelude::*;
 use tun::device::TunDevice;
@@ -339,6 +339,8 @@ struct UpdateInfo {
     release_url: String,
     release_notes: String,
     published_at: String,
+    installer_url: String,
+    installer_sha256: String,
 }
 
 /// 检查程序是否已注册开机自启动（计划任务）
@@ -416,12 +418,21 @@ async fn check_update() -> Result<UpdateInfo, String> {
     let url = "https://api.github.com/repos/PVPWHGAMES/dns-proxy/releases/latest";
     let response = client
         .get(url)
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
         .send()
         .await
         .map_err(|e| format!("请求 GitHub API 失败，请检查网络连接或代理设置: {}", e))?;
 
     if !response.status().is_success() {
-        return Err(format!("GitHub API 返回错误: {}", response.status()));
+        let status = response.status();
+        let message = response.text().await.unwrap_or_default().trim().to_string();
+        let detail = if message.is_empty() {
+            status.to_string()
+        } else {
+            format!("{} {}", status, message)
+        };
+        return Err(format!("GitHub API 返回错误: {}", detail));
     }
 
     let release: serde_json::Value = response
@@ -441,6 +452,27 @@ async fn check_update() -> Result<UpdateInfo, String> {
 
     let published_at = release["published_at"].as_str().unwrap_or("").to_string();
 
+    // 从资产列表中提取安装包下载地址和 SHA256 校验值
+    let mut installer_url = String::new();
+    let mut installer_sha256 = String::new();
+    if let Some(assets) = release["assets"].as_array() {
+        for asset in assets {
+            let name = asset["name"].as_str().unwrap_or("");
+            if name.to_ascii_lowercase().ends_with(".exe") {
+                installer_url = asset["browser_download_url"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
+                installer_sha256 = asset["digest"]
+                    .as_str()
+                    .unwrap_or("")
+                    .trim_start_matches("sha256:")
+                    .to_string();
+                break;
+            }
+        }
+    }
+
     // 比较版本号
     let has_update = compare_versions(&current_version, &latest_version);
 
@@ -451,6 +483,8 @@ async fn check_update() -> Result<UpdateInfo, String> {
         release_url,
         release_notes,
         published_at,
+        installer_url,
+        installer_sha256,
     })
 }
 
@@ -474,6 +508,87 @@ fn compare_versions(current: &str, latest: &str) -> bool {
     }
 
     false
+}
+
+/// 下载安装包、校验 SHA256，校验通过后启动 NSIS 安装器并退出当前程序
+#[tauri::command]
+async fn download_and_install(
+    app: AppHandle,
+    url: String,
+    sha256: String,
+) -> Result<String, String> {
+    if url.is_empty() {
+        return Err("安装包下载地址为空".to_string());
+    }
+
+    // 复用与 check_update 一致的系统代理配置
+    let mut builder = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .user_agent("dns-proxy")
+        .danger_accept_invalid_certs(false);
+    if let Ok(proxy_url) = std::env::var("HTTP_PROXY").or_else(|_| std::env::var("http_proxy")) {
+        if let Ok(proxy) = reqwest::Proxy::http(&proxy_url) {
+            builder = builder.proxy(proxy);
+        }
+    }
+    if let Ok(proxy_url) = std::env::var("HTTPS_PROXY").or_else(|_| std::env::var("https_proxy")) {
+        if let Ok(proxy) = reqwest::Proxy::https(&proxy_url) {
+            builder = builder.proxy(proxy);
+        }
+    }
+    let client = builder
+        .build()
+        .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
+
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("下载安装包失败，请检查网络连接或代理设置: {}", e))?;
+    if !response.status().is_success() {
+        return Err(format!("下载安装包失败: HTTP {}", response.status()));
+    }
+
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("读取安装包数据失败: {}", e))?;
+
+    // SHA256 校验
+    if !sha256.is_empty() {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes);
+        let computed = format!("{:x}", hasher.finalize());
+        if !computed.eq_ignore_ascii_case(&sha256) {
+            return Err(format!(
+                "安装包校验失败：期望 {}，实际 {}",
+                sha256, computed
+            ));
+        }
+    }
+
+    // 写入缓存目录
+    let file_name = url
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("dns-proxy-update.exe");
+    let cache_dir = dirs::cache_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("dns-proxy");
+    std::fs::create_dir_all(&cache_dir).map_err(|e| format!("创建下载目录失败: {}", e))?;
+    let installer_path = cache_dir.join(file_name);
+    std::fs::write(&installer_path, &bytes).map_err(|e| format!("写入安装包失败: {}", e))?;
+
+    // 启动 NSIS 安装器，成功后退出当前程序
+    std::process::Command::new(&installer_path)
+        .spawn()
+        .map_err(|e| format!("启动安装程序失败: {}", e))?;
+
+    app.exit(0);
+
+    Ok("安装程序已启动".to_string())
 }
 
 async fn run_latency_test(servers: &[crate::config::DnsServer]) -> Vec<DnsLatencyResult> {
@@ -1120,6 +1235,7 @@ pub fn run() {
             test_dns_latency,
             get_latency_results,
             check_update,
+            download_and_install,
             get_memory_usage,
             is_autostart_enabled,
             set_autostart

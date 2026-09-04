@@ -772,7 +772,7 @@ dependencies = [
 
 [[package]]
 name = "dns-proxy"
-version = "1.1.2"
+version = "1.1.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -785,6 +785,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "sha2",
  "socket2 0.5.10",
  "sysinfo",
  "tauri",

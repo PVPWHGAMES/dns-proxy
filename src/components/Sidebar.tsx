@@ -54,7 +54,7 @@ export default function Sidebar() {
           </div>
           <div>
             <h1 className="font-bold text-lg">果冻网络加速</h1>
-            <p className="text-xs text-muted-foreground">v1.1.2</p>
+            <p className="text-xs text-muted-foreground">v1.1.3</p>
           </div>
         </div>
       </div>

@@ -20,12 +20,16 @@ interface UpdateInfo {
   release_url: string;
   release_notes: string;
   published_at: string;
+  installer_url: string;
+  installer_sha256: string;
 }
 
 export default function About() {
   const [checking, setChecking] = useState(false);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState(false);
+  const [downloadMessage, setDownloadMessage] = useState<string | null>(null);
 
   const handleCheckUpdate = async () => {
     setChecking(true);
@@ -49,6 +53,26 @@ export default function About() {
       } catch {
         window.open(updateInfo.release_url, "_blank");
       }
+    }
+  };
+
+  const handleDownloadAndInstall = async () => {
+    if (!updateInfo || !updateInfo.installer_url) {
+      setDownloadMessage("未找到可用的安装包下载地址");
+      return;
+    }
+    setDownloading(true);
+    setDownloadMessage("正在下载安装包...");
+    try {
+      await invoke<string>("download_and_install", {
+        url: updateInfo.installer_url,
+        sha256: updateInfo.installer_sha256,
+      });
+      setDownloadMessage("已启动安装程序，即将退出...");
+    } catch (err) {
+      setDownloadMessage("下载安装失败: " + String(err));
+    } finally {
+      setDownloading(false);
     }
   };
 
@@ -78,7 +102,7 @@ export default function About() {
           </div>
         </div>
         <h1 className="text-2xl font-bold mb-1">果冻网络加速</h1>
-        <p className="text-muted-foreground mb-3">版本 1.1.2</p>
+        <p className="text-muted-foreground mb-3">版本 1.1.3</p>
 
         {/* 检查更新按钮 */}
         <div className="mt-6">
@@ -139,14 +163,32 @@ export default function About() {
                     <p className="whitespace-pre-wrap">{updateInfo.release_notes}</p>
                   </div>
                 )}
-                <button
-                  onClick={handleOpenRelease}
-                  className="mt-3 inline-flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
-                >
-                  <Download className="w-4 h-4" />
-                  前往下载
-                  <ExternalLink className="w-3 h-3" />
-                </button>
+                {downloadMessage && (
+                  <div className="mt-3 p-3 bg-background/50 rounded text-sm text-left">
+                    {downloadMessage}
+                  </div>
+                )}
+                <div className="mt-3 flex flex-wrap gap-2 justify-center">
+                  <button
+                    onClick={handleDownloadAndInstall}
+                    disabled={downloading || !updateInfo.installer_url}
+                    className="inline-flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {downloading ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <Download className="w-4 h-4" />
+                    )}
+                    {downloading ? "下载中..." : "下载并安装"}
+                  </button>
+                  <button
+                    onClick={handleOpenRelease}
+                    className="inline-flex items-center gap-2 px-4 py-2 border rounded-lg hover:bg-muted transition-colors"
+                  >
+                    前往下载页面
+                    <ExternalLink className="w-3 h-3" />
+                  </button>
+                </div>
               </div>
             ) : (
               <div className="p-4 bg-green-500/10 text-green-700 dark:text-green-400 rounded-lg">
