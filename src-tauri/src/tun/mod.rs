@@ -3,7 +3,6 @@ pub mod dns_intercept;
 
 use serde::{Deserialize, Serialize};
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TunConfig {
     pub enabled: bool,

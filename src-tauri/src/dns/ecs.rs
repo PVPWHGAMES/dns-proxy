@@ -57,7 +57,10 @@ pub fn inject_ecs(query_bytes: &[u8], client_ip: IpAddr, source_mask: u8) -> Vec
         packet[11] = ((additional_count + 1) & 0xFF) as u8;
     }
 
-    debug!("已注入 ECS: client_ip={}, mask=/{}/", client_ip, source_mask);
+    debug!(
+        "已注入 ECS: client_ip={}, mask=/{}/",
+        client_ip, source_mask
+    );
     packet
 }
 
@@ -251,8 +254,7 @@ mod tests {
             0x00, 0x00, // Authority RRs
             0x00, 0x00, // Additional RRs
             // Query name: example.com
-            0x07, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65,
-            0x03, 0x63, 0x6f, 0x6d,
+            0x07, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x03, 0x63, 0x6f, 0x6d,
             0x00, // Root label
             0x00, 0x01, // Type A
             0x00, 0x01, // Class IN

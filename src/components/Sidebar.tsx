@@ -1,16 +1,12 @@
-import { useState, useEffect } from "react";
 import { Link, useLocation } from "react-router-dom";
 import {
   LayoutDashboard,
   Settings,
   ListFilter,
   FileText,
-  Globe,
-  Shield,
   Wifi,
   Info,
 } from "lucide-react";
-import { api } from "../lib/api";
 
 const navItems = [
   {
@@ -47,34 +43,18 @@ const navItems = [
 
 export default function Sidebar() {
   const location = useLocation();
-  const [isRunning, setIsRunning] = useState(false);
-
-  useEffect(() => {
-    const refreshStatus = async () => {
-      try {
-        const status = await api.getServerStatus();
-        setIsRunning(status);
-      } catch (e) {
-        console.error("获取状态失败:", e);
-      }
-    };
-
-    refreshStatus();
-    const interval = setInterval(refreshStatus, 2000);
-    return () => clearInterval(interval);
-  }, []);
 
   return (
     <aside className="w-64 bg-card border-r flex flex-col">
       {/* Logo */}
-      <div className="p-6 border-b">
+      <div className="h-16 px-4 border-b flex items-center">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-lg bg-primary flex items-center justify-center">
-            <Globe className="w-6 h-6 text-primary-foreground" />
+          <div className="w-10 h-10 rounded-lg bg-primary flex items-center justify-center overflow-hidden">
+            <img src="/logo.png" alt="果冻网络加速" className="w-full h-full object-cover" />
           </div>
           <div>
-            <h1 className="font-bold text-lg">DNS Proxy</h1>
-            <p className="text-xs text-muted-foreground">v1.0.9</p>
+            <h1 className="font-bold text-lg">果冻网络加速</h1>
+            <p className="text-xs text-muted-foreground">v1.1.2</p>
           </div>
         </div>
       </div>
@@ -90,7 +70,7 @@ export default function Sidebar() {
               key={item.path}
               to={item.path}
               className={`
-                flex items-center gap-3 px-4 py-3 rounded-lg transition-all
+                flex items-center gap-3 px-4 py-3 rounded-lg transition-all active:scale-95
                 ${
                   isActive
                     ? "bg-primary text-primary-foreground shadow-md"
@@ -104,36 +84,6 @@ export default function Sidebar() {
           );
         })}
       </nav>
-
-      {/* 底部状态 */}
-      <div className="p-4 border-t">
-        <div
-          className={`flex items-center gap-3 px-4 py-3 rounded-lg ${
-            isRunning ? "bg-green-50 border border-green-200" : "bg-muted"
-          }`}
-        >
-          <Shield
-            className={`w-5 h-5 ${
-              isRunning ? "text-green-600" : "text-muted-foreground"
-            }`}
-          />
-          <div>
-            <p className="text-sm font-medium">代理状态</p>
-            <div className="flex items-center gap-2">
-              {isRunning && (
-                <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-              )}
-              <p
-                className={`text-xs ${
-                  isRunning ? "text-green-600 font-medium" : "text-muted-foreground"
-                }`}
-              >
-                {isRunning ? "运行中" : "未运行"}
-              </p>
-            </div>
-          </div>
-        </div>
-      </div>
     </aside>
   );
 }

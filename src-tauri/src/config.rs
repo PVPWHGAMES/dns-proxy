@@ -14,10 +14,12 @@ pub struct AppConfig {
     pub upstream: Vec<DnsServer>,
     pub rules: Vec<Rule>,
     pub subscriptions: Vec<Subscription>,
-    pub subscription_update_interval: u64,  // 订阅更新间隔（分钟）
-    pub latency_test_interval: u64,  // 延迟测试间隔（秒），0表示禁用
+    pub subscription_update_interval: u64, // 订阅更新间隔（分钟）
+    pub latency_test_interval: u64,        // 延迟测试间隔（秒），0表示禁用
     pub log: LogConfig,
     pub strategy: DnsStrategy,
+    #[serde(default)]
+    pub start_minimized: bool,
     #[serde(default = "default_server_groups")]
     pub server_groups: Vec<ServerGroup>,
     #[serde(default)]
@@ -64,9 +66,18 @@ fn default_ipv6_mask() -> u8 {
 
 fn default_server_groups() -> Vec<ServerGroup> {
     vec![
-        ServerGroup { name: "default".to_string(), description: "默认组".to_string() },
-        ServerGroup { name: "domestic".to_string(), description: "直连".to_string() },
-        ServerGroup { name: "proxy".to_string(), description: "代理".to_string() },
+        ServerGroup {
+            name: "default".to_string(),
+            description: "默认组".to_string(),
+        },
+        ServerGroup {
+            name: "domestic".to_string(),
+            description: "直连".to_string(),
+        },
+        ServerGroup {
+            name: "proxy".to_string(),
+            description: "代理".to_string(),
+        },
     ]
 }
 
@@ -138,16 +149,16 @@ pub enum RuleType {
     Exact,
     Wildcard,
     Regex,
-    Blocklist,  // 黑名单模式
+    Blocklist, // 黑名单模式
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum RuleAction {
     Forward,
-    Allow,       // 白名单，跳过黑名单检查
+    Allow, // 白名单，跳过黑名单检查
     Block,
-    BlockNull,   // 返回0.0.0.0
+    BlockNull,     // 返回0.0.0.0
     BlockNxdomain, // 返回NXDOMAIN
     Cache,
 }
@@ -156,8 +167,8 @@ pub enum RuleAction {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum SubscriptionType {
-    Blocklist,  // 黑名单（广告拦截）
-    Geosite,    // 域名路由（国内外分流）
+    Blocklist, // 黑名单（广告拦截）
+    Geosite,   // 域名路由（国内外分流）
 }
 
 // 订阅
@@ -166,12 +177,12 @@ pub struct Subscription {
     pub name: String,
     pub url: String,
     pub enabled: bool,
-    pub rules: Vec<String>,  // 缓存的规则列表
+    pub rules: Vec<String>, // 缓存的规则列表
     pub last_updated: Option<String>,
     #[serde(default = "default_sub_type")]
     pub sub_type: SubscriptionType,
     #[serde(default)]
-    pub target_group: Option<String>,  // geosite 类型的目标服务器组
+    pub target_group: Option<String>, // geosite 类型的目标服务器组
 }
 
 fn default_sub_type() -> SubscriptionType {
@@ -217,19 +228,29 @@ impl Default for AppConfig {
                 },
             ],
             server_groups: vec![
-                ServerGroup { name: "default".to_string(), description: "默认组".to_string() },
-                ServerGroup { name: "domestic".to_string(), description: "直连".to_string() },
-                ServerGroup { name: "proxy".to_string(), description: "代理".to_string() },
+                ServerGroup {
+                    name: "default".to_string(),
+                    description: "默认组".to_string(),
+                },
+                ServerGroup {
+                    name: "domestic".to_string(),
+                    description: "直连".to_string(),
+                },
+                ServerGroup {
+                    name: "proxy".to_string(),
+                    description: "代理".to_string(),
+                },
             ],
             rules: Vec::new(),
             subscriptions: Vec::new(),
-            subscription_update_interval: 120,  // 默认2小时
-            latency_test_interval: 300,  // 默认5分钟
+            subscription_update_interval: 120, // 默认2小时
+            latency_test_interval: 300,        // 默认5分钟
             log: LogConfig {
                 level: "info".to_string(),
                 file: None,
             },
             strategy: DnsStrategy::Fastest,
+            start_minimized: false,
             tun: TunConfig::default(),
             ecs: EcsConfig::default(),
         }
@@ -251,7 +272,9 @@ impl AppConfig {
             let content = std::fs::read_to_string(&path).unwrap_or_default();
             toml::from_str(&content).unwrap_or_default()
         } else {
-            Self::default()
+            let mut config = Self::default();
+            config.tun.enabled = true;
+            config
         };
         config.migrate();
         config
@@ -305,11 +328,17 @@ impl AppConfig {
 
         // 确保 domestic 和 proxy 分组存在
         if !self.server_groups.iter().any(|g| g.name == "domestic") {
-            self.server_groups.push(ServerGroup { name: "domestic".to_string(), description: "直连".to_string() });
+            self.server_groups.push(ServerGroup {
+                name: "domestic".to_string(),
+                description: "直连".to_string(),
+            });
             changed = true;
         }
         if !self.server_groups.iter().any(|g| g.name == "proxy") {
-            self.server_groups.push(ServerGroup { name: "proxy".to_string(), description: "代理".to_string() });
+            self.server_groups.push(ServerGroup {
+                name: "proxy".to_string(),
+                description: "代理".to_string(),
+            });
             changed = true;
         }
 

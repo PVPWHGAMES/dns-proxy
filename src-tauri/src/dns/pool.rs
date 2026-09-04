@@ -129,11 +129,7 @@ impl DnsConnectionPool {
     /// 创建新的 DoT 连接
     async fn create_dot_connection(&self, addr: &str, server_name: &str) -> Option<DoTConnection> {
         // TCP 连接
-        let tcp = match tokio::time::timeout(
-            Duration::from_secs(3),
-            TcpStream::connect(addr),
-        )
-        .await
+        let tcp = match tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(addr)).await
         {
             Ok(Ok(stream)) => stream,
             Ok(Err(e)) => {
@@ -163,12 +159,7 @@ impl DnsConnectionPool {
         };
 
         // TLS 握手
-        match tokio::time::timeout(
-            Duration::from_secs(3),
-            connector.connect(domain, tcp),
-        )
-        .await
-        {
+        match tokio::time::timeout(Duration::from_secs(3), connector.connect(domain, tcp)).await {
             Ok(Ok(stream)) => {
                 debug!("[连接池] DoT 新连接建立: {}", addr);
                 Some(stream)

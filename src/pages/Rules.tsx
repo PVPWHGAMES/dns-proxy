@@ -13,6 +13,8 @@ import {
   MapPin,
 } from "lucide-react";
 import { api, AppConfig, Rule, RuleType, RuleAction, Subscription, SubscriptionType } from "../lib/api";
+import MessageBanner from "../components/ui/MessageBanner";
+import Badge from "../components/ui/Badge";
 
 // 可展开的订阅规则列表组件
 function SubscriptionRules({
@@ -53,7 +55,7 @@ function SubscriptionRules({
             {search && ` · 过滤 ${filtered.length} 条`}
           </span>
           {!sub.enabled && (
-            <span className="text-xs bg-yellow-100 text-yellow-700 px-2 py-0.5 rounded">已禁用</span>
+            <Badge variant="warning">已禁用</Badge>
           )}
         </div>
         <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
@@ -311,11 +313,7 @@ export default function Rules() {
 
   return (
     <div className="space-y-6">
-      {message && (
-        <div className={`p-4 rounded-lg ${message.type === "success" ? "bg-green-100 text-green-700 border border-green-200" : "bg-red-100 text-red-700 border border-red-200"}`}>
-          {message.text}
-        </div>
-      )}
+      {message && <MessageBanner type={message.type} text={message.text} />}
 
       {/* ========== 黑名单订阅 ========== */}
       <div className="bg-card rounded-xl border">
@@ -425,9 +423,9 @@ export default function Rules() {
                 <p className="text-xs text-muted-foreground mb-1">🏠 国内域名 (→ 直连)</p>
                 <div className="flex flex-wrap gap-2">
                   {[
-                    { name: "CN 国内直连域名", url: "https://ghfast.top/https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/direct-list.txt", group: "domestic" },
-                    { name: "Apple 中国域名", url: "https://ghfast.top/https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/apple-cn.txt", group: "domestic" },
-                    { name: "Google 中国域名", url: "https://ghfast.top/https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/google-cn.txt", group: "domestic" },
+                    { name: "CN 国内直连域名", url: "https://github.anzu.vip/https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/direct-list.txt", group: "domestic" },
+                    { name: "Apple 中国域名", url: "https://github.anzu.vip/https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/apple-cn.txt", group: "domestic" },
+                    { name: "Google 中国域名", url: "https://github.anzu.vip/https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/google-cn.txt", group: "domestic" },
                   ].map((preset) => (
                     <button
                       key={preset.name}
@@ -455,7 +453,7 @@ export default function Rules() {
                 <p className="text-xs text-muted-foreground mb-1">🌐 国外域名 (→ 代理) <span className="text-muted-foreground/70">包含 Google/GitHub/YouTube/Telegram/OpenAI 等全部国外服务</span></p>
                 <div className="flex flex-wrap gap-2">
                   {[
-                    { name: "Proxy 需代理域名", url: "https://ghfast.top/https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/proxy-list.txt", group: "proxy" },
+                    { name: "Proxy 需代理域名", url: "https://github.anzu.vip/https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/proxy-list.txt", group: "proxy" },
                   ].map((preset) => (
                     <button
                       key={preset.name}
@@ -483,7 +481,7 @@ export default function Rules() {
                 <p className="text-xs text-muted-foreground mb-1">🚫 广告拦截 (→ blocklist)</p>
                 <div className="flex flex-wrap gap-2">
                   {[
-                    { name: "广告拦截域名", url: "https://ghfast.top/https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/reject-list.txt" },
+                    { name: "广告拦截域名", url: "https://github.anzu.vip/https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/reject-list.txt" },
                   ].map((preset) => (
                     <button
                       key={preset.name}
@@ -511,9 +509,9 @@ export default function Rules() {
                 <p className="text-xs text-muted-foreground mb-1">🛡️ 恶意域名防护 (→ blocklist)</p>
                 <div className="flex flex-wrap gap-2">
                   {[
-                    { name: "PhishTank 钓鱼网站", url: "https://raw.githubusercontent.com/stamparm/maltrail/master/trails/static/suspicious/domain.txt" },
-                    { name: "Malware 恶意软件域名", url: "https://raw.githubusercontent.com/stamparm/maltrail/master/trails/static/malware/domain.txt" },
-                    { name: "恶意域名综合列表", url: "https://ghfast.top/https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/reject-list.txt" },
+                    { name: "PhishTank 钓鱼网站", url: "https://github.anzu.vip/https://raw.githubusercontent.com/stamparm/maltrail/master/trails/static/suspicious/domain.txt" },
+                    { name: "Malware 恶意软件域名", url: "https://github.anzu.vip/https://raw.githubusercontent.com/stamparm/maltrail/master/trails/static/malware/domain.txt" },
+                    { name: "恶意域名综合列表", url: "https://github.anzu.vip/https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/reject-list.txt" },
                   ].map((preset) => (
                     <button
                       key={preset.name}
@@ -556,7 +554,9 @@ export default function Rules() {
                         <span className="font-medium">{sub.name}</span>
                         <span className="text-xs text-muted-foreground bg-muted px-2 py-0.5 rounded">{sub.rules.length} 条</span>
                         {sub.target_group && (
-                          <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded">→ {sub.target_group === "domestic" ? "直连" : sub.target_group === "proxy" ? "代理" : sub.target_group}</span>
+                          <Badge variant={sub.target_group === "domestic" ? "info" : sub.target_group === "proxy" ? "orange" : "neutral"}>
+                            → {sub.target_group === "domestic" ? "直连" : sub.target_group === "proxy" ? "代理" : sub.target_group}
+                          </Badge>
                         )}
                       </div>
                       <p className="text-xs text-muted-foreground truncate">{sub.url}</p>
@@ -669,14 +669,14 @@ export default function Rules() {
                   <td className="p-3 text-sm font-medium">{rule.name}</td>
                   <td className="p-3 text-sm font-mono">{rule.pattern}</td>
                   <td className="p-3 text-sm">
-                    <span className={`px-2 py-1 rounded text-xs ${rule.rule_type === "exact" ? "bg-blue-100 text-blue-700" : rule.rule_type === "wildcard" ? "bg-purple-100 text-purple-700" : "bg-orange-100 text-orange-700"}`}>
+                    <Badge variant={rule.rule_type === "exact" ? "info" : rule.rule_type === "wildcard" ? "purple" : "orange"}>
                       {rule.rule_type === "exact" ? "精确" : rule.rule_type === "wildcard" ? "通配符" : "正则"}
-                    </span>
+                    </Badge>
                   </td>
                   <td className="p-3 text-sm">
-                    <span className={`px-2 py-1 rounded text-xs ${rule.action === "allow" ? "bg-emerald-100 text-emerald-700" : rule.action === "block" || rule.action === "block_null" || rule.action === "block_nxdomain" ? "bg-red-100 text-red-700" : rule.action === "forward" ? "bg-green-100 text-green-700" : "bg-yellow-100 text-yellow-700"}`}>
+                    <Badge variant={rule.action === "allow" ? "success" : rule.action === "block" || rule.action === "block_null" || rule.action === "block_nxdomain" ? "danger" : rule.action === "forward" ? "info" : "warning"}>
                       {rule.action === "allow" ? "白名单" : rule.action === "block" ? "阻止" : rule.action === "block_null" ? "阻止(0.0.0.0)" : rule.action === "block_nxdomain" ? "阻止(NX)" : rule.action === "forward" ? `转发 → ${rule.target || "默认"}` : "缓存"}
-                    </span>
+                    </Badge>
                   </td>
                   <td className="p-3 text-sm">{rule.priority}</td>
                   <td className="p-3">
@@ -700,20 +700,20 @@ export default function Rules() {
       <div className="bg-card rounded-xl border p-4">
         <h4 className="font-semibold mb-3">匹配模式说明</h4>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 text-sm">
-          <div className="p-3 bg-blue-50 rounded-lg">
-            <p className="font-medium text-blue-700">精确匹配</p>
+          <div className="p-3 bg-blue-50 dark:bg-blue-500/10 rounded-lg">
+            <p className="font-medium text-blue-700 dark:text-blue-400">精确匹配</p>
             <p className="text-muted-foreground mt-1">完全匹配域名，如 <code>example.com</code></p>
           </div>
-          <div className="p-3 bg-purple-50 rounded-lg">
-            <p className="font-medium text-purple-700">通配符匹配</p>
+          <div className="p-3 bg-purple-50 dark:bg-purple-500/10 rounded-lg">
+            <p className="font-medium text-purple-700 dark:text-purple-400">通配符匹配</p>
             <p className="text-muted-foreground mt-1">使用 <code>*</code> 匹配，如 <code>*.example.com</code></p>
           </div>
-          <div className="p-3 bg-orange-50 rounded-lg">
-            <p className="font-medium text-orange-700">正则表达式</p>
+          <div className="p-3 bg-orange-50 dark:bg-orange-500/10 rounded-lg">
+            <p className="font-medium text-orange-700 dark:text-orange-400">正则表达式</p>
             <p className="text-muted-foreground mt-1">使用正则匹配，如 <code>.*\.example\.com</code></p>
           </div>
-          <div className="p-3 bg-red-50 rounded-lg">
-            <p className="font-medium text-red-700">域名路由</p>
+          <div className="p-3 bg-red-50 dark:bg-red-500/10 rounded-lg">
+            <p className="font-medium text-red-700 dark:text-red-400">域名路由</p>
             <p className="text-muted-foreground mt-1">GeoSite 列表，按域名分流到不同服务器组</p>
           </div>
         </div>

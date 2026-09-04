@@ -2,7 +2,7 @@ use crate::dns::handler::DnsHandler;
 use crate::tun::device::TunDevice;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 pub struct DnsInterceptor {
     tun_device: Arc<Mutex<TunDevice>>,
@@ -56,7 +56,9 @@ impl DnsInterceptor {
                             Err(e) => Err(e),
                         }
                     }
-                }).await {
+                })
+                .await
+                {
                     Ok(Ok(pkt)) => pkt,
                     Ok(Err(e)) => {
                         // 只在运行时记录错误
@@ -92,12 +94,18 @@ impl DnsInterceptor {
 
                         match handler.handle_query(&dns_query, src_addr).await {
                             Some(response) => {
-                                if let Some(response_packet) = Self::build_dns_response(&packet_data, &response) {
+                                if let Some(response_packet) =
+                                    Self::build_dns_response(&packet_data, &response)
+                                {
                                     let device = tun_clone.lock().await;
                                     if let Some(session) = device.get_session() {
-                                        match session.allocate_send_packet(response_packet.len() as u16) {
+                                        match session
+                                            .allocate_send_packet(response_packet.len() as u16)
+                                        {
                                             Ok(mut allocator) => {
-                                                allocator.bytes_mut().copy_from_slice(&response_packet);
+                                                allocator
+                                                    .bytes_mut()
+                                                    .copy_from_slice(&response_packet);
                                                 session.send_packet(allocator);
                                             }
                                             Err(e) => {
@@ -151,7 +159,8 @@ impl DnsInterceptor {
             return None;
         }
 
-        info!("捕获DNS请求: {} -> {}",
+        info!(
+            "捕获DNS请求: {} -> {}",
             std::net::Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]),
             std::net::Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19])
         );
@@ -188,9 +197,12 @@ impl DnsInterceptor {
 
         // UDP头 - 交换端口
         let udp_offset = ihl;
-        response[udp_offset..udp_offset + 2].copy_from_slice(&query_packet[udp_offset + 2..udp_offset + 4]);
-        response[udp_offset + 2..udp_offset + 4].copy_from_slice(&query_packet[udp_offset..udp_offset + 2]);
-        response[udp_offset + 4..udp_offset + 6].copy_from_slice(&((8 + dns_response.len()) as u16).to_be_bytes());
+        response[udp_offset..udp_offset + 2]
+            .copy_from_slice(&query_packet[udp_offset + 2..udp_offset + 4]);
+        response[udp_offset + 2..udp_offset + 4]
+            .copy_from_slice(&query_packet[udp_offset..udp_offset + 2]);
+        response[udp_offset + 4..udp_offset + 6]
+            .copy_from_slice(&((8 + dns_response.len()) as u16).to_be_bytes());
 
         // DNS响应
         response[ihl + 8..].copy_from_slice(dns_response);

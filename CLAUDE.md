@@ -111,8 +111,14 @@ npm install
 # 开发模式（前后端热重载）
 npm run tauri dev
 
-# 构建生产版本
+# 构建生产版本（含安装包）
 npm run tauri build
+
+# 仅编译 exe（不含安装包）← 日常开发使用这个
+npx tauri build --no-bundle
+
+# Rust 单独编译检查（不用于最终产物，缺少嵌入式前端）
+cd src-tauri && cargo check
 
 # Rust测试
 cd src-tauri && cargo test
@@ -126,10 +132,28 @@ npm run lint
 
 ## 工作流程约定
 
+### 编译可执行文件（重要）
+
+- **正确命令**：`npx tauri build --no-bundle`
+- ⚠️ **禁止使用 `cargo build --release`**：该命令编译出的 exe 含 `cfg=dev` 标记，会尝试连接 `localhost:9000` 开发服务器而非使用内嵌前端资源，导致启动后 WebView 显示「连接已中断」
+- 原因：Tauri v2 需要 CLI 工具（`npx tauri`）设置正确的生产环境变量，`cargo build` 独用会默认走开发模式
+- 编译前自动执行 `npm run build`（`tsc && vite build`）编译前端资源
+- 产物路径：`src-tauri/target/release/dns-proxy.exe`
+
 ### 任务完成后的操作
 
-- **自动编译**：任务完成后自动编译 `dns-proxy.exe`，包括前端资源打包
-- **不生成安装包**：常规任务完成时只编译可执行文件，不生成 NSIS 安装包
+- **自动编译**：任务完成后自动执行 `npx tauri build --no-bundle` 编译 `dns-proxy.exe`
+- **不生成安装包**：常规任务完成时只编译可执行文件，不生成 NSIS/MSI 安装包
+
+### 安装包生成
+
+- **只生成 NSIS（exe 安装包），抛弃 MSI**：WiX 用代码页 1252 无法编码中文产品名，MSI 打包会报 `LGHT0311` 失败
+- **productName 用英文 `DNS Proxy`**：安装信息（安装包名、控制面板显示名、安装目录）保持英文；界面显示名（Sidebar/About/窗口标题）仍用中文「果冻网络加速」，两者独立互不影响
+- 生成命令：`npx tauri build`（`tauri.conf.json` 的 `bundle.targets` 已固定为 `["nsis"]`）
+- 产物路径：`src-tauri/target/release/bundle/nsis/DNS Proxy_<版本>_x64-setup.exe`
+- **安装到 Program Files**：`tauri.conf.json` 的 `bundle.windows.nsis.installMode` 设为 `"perMachine"`（安装目录默认 `C:\Program Files\DNS Proxy`，需要管理员安装）
+- **双击运行弹 UAC 提权**：`build.rs` 通过 `tauri_build::WindowsAttributes::app_manifest(include_str!("app-manifest.xml"))` 设置 `requestedExecutionLevel="requireAdministrator"`。因为 TUN 模式要改系统 DNS、创建虚拟网卡，必须管理员权限，双击运行即弹 UAC 兜底，无需手动右键管理员运行
+- **自启动用计划任务（不是注册表 Run 键）**：`requireAdministrator` 下，写 `HKCU\...\Run` 键的程序在登录时会被 Windows 静默跳过（无法静默提权）。所以 `lib.rs` 的 `is_autostart_enabled`/`set_autostart` 改用 `schtasks` 计划任务：`/SC ONLOGON /RL HIGHEST`，登录时以最高权限静默启动，不弹 UAC。任务名固定 `DNS Proxy`
 
 ### 源码更新
 

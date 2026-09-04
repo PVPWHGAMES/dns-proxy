@@ -30,6 +30,8 @@ import {
   Pie,
   Cell,
 } from "recharts";
+import Badge from "../components/ui/Badge";
+import StatCard from "../components/ui/StatCard";
 
 export default function Dashboard() {
   const [stats, setStats] = useState<DnsStats>({
@@ -214,7 +216,7 @@ export default function Dashboard() {
 
           {stats.is_running && (
             <div className="mt-3 flex items-center gap-4 text-sm">
-              <div className="flex items-center gap-2 text-green-600">
+              <div className="flex items-center gap-2 text-green-600 dark:text-green-400">
                 <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
                 <span>DNS 服务正常运行</span>
               </div>
@@ -285,7 +287,7 @@ export default function Dashboard() {
 
           {tunStatus.active && (
             <div className="mt-3 flex items-center gap-4 text-sm">
-              <div className="flex items-center gap-2 text-green-600">
+              <div className="flex items-center gap-2 text-green-600 dark:text-green-400">
                 <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
                 <span>TUN 正常运行</span>
               </div>
@@ -389,12 +391,12 @@ export default function Dashboard() {
           <div className="bg-card rounded-xl border p-4">
             <h3 className="font-semibold mb-4 flex items-center gap-2">
               <Globe className="w-5 h-5" />
-              Top 10 热门域名
+              Top 5 热门域名
             </h3>
             {trafficStats.top_domains.length > 0 ? (
               <ResponsiveContainer width="100%" height={200}>
                 <BarChart
-                  data={trafficStats.top_domains}
+                  data={trafficStats.top_domains.slice(0, 5)}
                   layout="vertical"
                   margin={{ left: 80 }}
                 >
@@ -466,13 +468,13 @@ export default function Dashboard() {
             <div className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
                 <div className="text-center p-3 bg-muted/50 rounded-lg">
-                  <p className="text-2xl font-bold text-blue-600">
+                  <p className="text-2xl font-bold text-blue-600 dark:text-blue-400">
                     {trafficStats.total_queries.toLocaleString()}
                   </p>
                   <p className="text-sm text-muted-foreground">总查询数</p>
                 </div>
                 <div className="text-center p-3 bg-muted/50 rounded-lg">
-                  <p className="text-2xl font-bold text-green-600">
+                  <p className="text-2xl font-bold text-green-600 dark:text-green-400">
                     {trafficStats.queries_per_second.toFixed(1)}
                   </p>
                   <p className="text-sm text-muted-foreground">QPS</p>
@@ -494,13 +496,13 @@ export default function Dashboard() {
               <div className="space-y-4">
                 <div className="grid grid-cols-2 gap-4">
                   <div className="text-center p-3 bg-muted/50 rounded-lg">
-                    <p className="text-2xl font-bold text-purple-600">
+                    <p className="text-2xl font-bold text-purple-600 dark:text-purple-400">
                       {(cacheStats.hit_rate * 100).toFixed(1)}%
                     </p>
                     <p className="text-sm text-muted-foreground">命中率</p>
                   </div>
                   <div className="text-center p-3 bg-muted/50 rounded-lg">
-                    <p className="text-2xl font-bold text-orange-600">
+                    <p className="text-2xl font-bold text-orange-600 dark:text-orange-400">
                       {cacheStats.current_size}/{cacheStats.max_size}
                     </p>
                     <p className="text-sm text-muted-foreground">缓存条目</p>
@@ -509,11 +511,11 @@ export default function Dashboard() {
                 <div className="grid grid-cols-2 gap-4 text-sm">
                   <div className="flex justify-between px-2">
                     <span className="text-muted-foreground">命中</span>
-                    <span className="font-medium text-green-600">{cacheStats.cache_hits.toLocaleString()}</span>
+                    <span className="font-medium text-green-600 dark:text-green-400">{cacheStats.cache_hits.toLocaleString()}</span>
                   </div>
                   <div className="flex justify-between px-2">
                     <span className="text-muted-foreground">未命中</span>
-                    <span className="font-medium text-red-600">{cacheStats.cache_misses.toLocaleString()}</span>
+                    <span className="font-medium text-red-600 dark:text-red-400">{cacheStats.cache_misses.toLocaleString()}</span>
                   </div>
                 </div>
               </div>
@@ -530,15 +532,15 @@ export default function Dashboard() {
               <div className="space-y-4">
                 <div className="grid grid-cols-3 gap-3">
                   <div className="text-center p-3 bg-muted/50 rounded-lg">
-                    <p className="text-2xl font-bold text-blue-600">{poolStats.udp_channels}</p>
+                    <p className="text-2xl font-bold text-blue-600 dark:text-blue-400">{poolStats.udp_channels}</p>
                     <p className="text-xs text-muted-foreground">UDP 通道</p>
                   </div>
                   <div className="text-center p-3 bg-muted/50 rounded-lg">
-                    <p className="text-2xl font-bold text-purple-600">{poolStats.dot_idle_connections}</p>
+                    <p className="text-2xl font-bold text-purple-600 dark:text-purple-400">{poolStats.dot_idle_connections}</p>
                     <p className="text-xs text-muted-foreground">DoT 空闲</p>
                   </div>
                   <div className="text-center p-3 bg-muted/50 rounded-lg">
-                    <p className="text-2xl font-bold text-orange-600">{poolStats.dot_hosts}</p>
+                    <p className="text-2xl font-bold text-orange-600 dark:text-orange-400">{poolStats.dot_hosts}</p>
                     <p className="text-xs text-muted-foreground">DoT 主机</p>
                   </div>
                 </div>
@@ -600,25 +602,26 @@ export default function Dashboard() {
                       <div className="flex items-center gap-1 truncate">
                         <span className="truncate">{log.upstream}</span>
                         {log.group && (
-                          <span className={`shrink-0 px-1.5 py-0.5 rounded text-[10px] ${
-                            log.group === "domestic" ? "bg-blue-100 text-blue-600" :
-                            log.group === "proxy" ? "bg-orange-100 text-orange-600" :
-                            "bg-gray-100 text-gray-600"
-                          }`}>
+                          <Badge
+                            variant={log.group === "domestic" ? "info" : log.group === "proxy" ? "orange" : "neutral"}
+                            className="shrink-0 text-[10px]"
+                          >
                             {log.group === "domestic" ? "直连" : log.group === "proxy" ? "代理" : log.group}
-                          </span>
+                          </Badge>
                         )}
                       </div>
                     </td>
                     <td className="p-3 text-sm whitespace-nowrap">
-                      <span className={`px-2 py-1 rounded-full text-xs font-medium ${
-                        log.action === "success" ? "bg-green-100 text-green-700" :
-                        log.action === "blocked" ? "bg-red-100 text-red-700" :
-                        log.action === "coalesced" ? "bg-teal-100 text-teal-700" :
-                        "bg-blue-100 text-blue-700"
-                      }`}>
+                      <Badge
+                        variant={
+                          log.action === "success" ? "success" :
+                          log.action === "blocked" ? "danger" :
+                          log.action === "coalesced" ? "teal" :
+                          "info"
+                        }
+                      >
                         {log.action === "success" ? "成功" : log.action === "blocked" ? "阻止" : log.action === "coalesced" ? "合并" : "缓存"}
-                      </span>
+                      </Badge>
                     </td>
                   </tr>
                 ))
@@ -628,32 +631,6 @@ export default function Dashboard() {
         </div>
       </div>
 
-    </div>
-  );
-}
-
-function StatCard({ title, value, icon: Icon, color }: {
-  title: string; value: string; icon: any; color: string;
-}) {
-  const colors: Record<string, string> = {
-    blue: "bg-blue-50 text-blue-600",
-    red: "bg-red-50 text-red-600",
-    yellow: "bg-yellow-50 text-yellow-600",
-    green: "bg-green-50 text-green-600",
-    purple: "bg-purple-50 text-purple-600",
-  };
-
-  return (
-    <div className="bg-card rounded-xl border p-4">
-      <div className="flex items-center justify-between">
-        <div className={`p-2 rounded-lg ${colors[color]}`}>
-          <Icon className="w-5 h-5" />
-        </div>
-      </div>
-      <div className="mt-3">
-        <p className="text-2xl font-bold">{value}</p>
-        <p className="text-sm text-muted-foreground">{title}</p>
-      </div>
     </div>
   );
 }

@@ -24,7 +24,10 @@ impl DnsServer {
             std::time::Duration::from_secs(config.proxy.cache_ttl),
         ));
         let handler = Arc::new(DnsHandler::new(config.clone(), cache));
-        let listen_addr = format!("{}:{}", config.proxy.listen_address, config.proxy.listen_port);
+        let listen_addr = format!(
+            "{}:{}",
+            config.proxy.listen_address, config.proxy.listen_port
+        );
         let update_interval_minutes = config.subscription_update_interval;
 
         Self {
@@ -62,9 +65,9 @@ impl DnsServer {
                 // 尝试强制释放端口并重试
                 self.force_release_port().await;
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                self.bind_socket_with_reuse()
-                    .map(Arc::new)
-                    .map_err(|e| anyhow::anyhow!("绑定端口失败，请检查是否有其他程序占用53端口: {}", e))?
+                self.bind_socket_with_reuse().map(Arc::new).map_err(|e| {
+                    anyhow::anyhow!("绑定端口失败，请检查是否有其他程序占用53端口: {}", e)
+                })?
             }
         };
 
@@ -97,7 +100,9 @@ impl DnsServer {
                         let socket = socket.clone();
 
                         tokio::spawn(async move {
-                            if let Some(response) = handler.handle_query(&query_bytes, src_addr).await {
+                            if let Some(response) =
+                                handler.handle_query(&query_bytes, src_addr).await
+                            {
                                 if let Err(e) = socket.send_to(&response, src_addr).await {
                                     error!("发送DNS响应失败: {}", e);
                                 }

@@ -71,6 +71,7 @@ export interface AppConfig {
   subscriptions: Subscription[];
   subscription_update_interval: number;
   latency_test_interval: number;
+  start_minimized: boolean;
   log: LogConfig;
   strategy: DnsStrategy;
   server_groups: ServerGroup[];

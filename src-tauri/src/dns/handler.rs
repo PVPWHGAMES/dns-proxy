@@ -1,4 +1,6 @@
-use crate::config::{AppConfig, DnsProtocol, DnsStrategy, RuleAction, RuleType, Subscription, SubscriptionType};
+use crate::config::{
+    AppConfig, DnsProtocol, DnsStrategy, RuleAction, RuleType, Subscription, SubscriptionType,
+};
 use crate::dns::cache::DnsCache;
 use crate::dns::ecs;
 use crate::dns::pool::DnsConnectionPool;
@@ -8,9 +10,9 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex as AsyncMutex;
-use tracing::{info, warn, debug};
+use tracing::{debug, info, warn};
 use trust_dns_client::op::Message;
-use trust_dns_client::rr::{Record, RecordType, RData};
+use trust_dns_client::rr::{RData, Record, RecordType};
 use trust_dns_proto::serialize::binary::{BinDecodable, BinEncodable};
 
 pub struct DnsHandler {
@@ -21,12 +23,12 @@ pub struct DnsHandler {
     log_id_counter: Arc<Mutex<u64>>,
     strategy_index: Arc<Mutex<usize>>,
     http_client: Arc<reqwest::Client>,
-    blocklist: Arc<Mutex<HashSet<String>>>,  // 黑名单域名集合
-    geosite_map: Arc<Mutex<HashMap<String, String>>>,  // 域名 -> 目标分组
-    server_latency: Arc<Mutex<HashMap<String, ServerLatency>>>,  // 服务器延迟统计
+    blocklist: Arc<Mutex<HashSet<String>>>, // 黑名单域名集合
+    geosite_map: Arc<Mutex<HashMap<String, String>>>, // 域名 -> 目标分组
+    server_latency: Arc<Mutex<HashMap<String, ServerLatency>>>, // 服务器延迟统计
     public_ip: Arc<Mutex<Option<IpAddr>>>,  // 自动获取的公网 IP
-    public_ip_last_update: Arc<Mutex<Option<Instant>>>,  // 上次更新时间
-    traffic_stats: Arc<Mutex<TrafficStatsCollector>>,  // 流量统计收集器
+    public_ip_last_update: Arc<Mutex<Option<Instant>>>, // 上次更新时间
+    traffic_stats: Arc<Mutex<TrafficStatsCollector>>, // 流量统计收集器
     /// 上游连接池（DoT 长连接 + UDP socket 复用）
     pool: Arc<DnsConnectionPool>,
     /// 请求合并：等待中的查询 (cache_key -> 追随者列表)
@@ -60,10 +62,10 @@ pub struct QueryStats {
 /// 时间桶统计（每分钟）
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TimeBucket {
-    pub time: String,      // "HH:MM" 格式
-    pub total: u64,        // 总查询数
-    pub blocked: u64,      // 阻止数
-    pub cached: u64,       // 缓存命中数
+    pub time: String, // "HH:MM" 格式
+    pub total: u64,   // 总查询数
+    pub blocked: u64, // 阻止数
+    pub cached: u64,  // 缓存命中数
 }
 
 /// 域名统计
@@ -76,15 +78,15 @@ pub struct DomainStat {
 /// 延迟分布
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LatencyDistribution {
-    pub range: String,     // "0-10ms", "10-50ms", etc.
+    pub range: String, // "0-10ms", "10-50ms", etc.
     pub count: u64,
 }
 
 /// 流量统计数据（返回给前端）
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TrafficStats {
-    pub timeline: Vec<TimeBucket>,           // 时间线数据
-    pub top_domains: Vec<DomainStat>,        // Top 10 域名
+    pub timeline: Vec<TimeBucket>,              // 时间线数据
+    pub top_domains: Vec<DomainStat>,           // Top 10 域名
     pub latency_dist: Vec<LatencyDistribution>, // 延迟分布
     pub total_queries: u64,
     pub queries_per_second: f64,
@@ -124,8 +126,8 @@ impl DnsHandler {
 
         // 创建上游连接池
         let pool = Arc::new(DnsConnectionPool::new(
-            8,                              // 每主机最多 8 个空闲连接
-            Duration::from_secs(120),       // 空闲连接 120 秒过期
+            8,                        // 每主机最多 8 个空闲连接
+            Duration::from_secs(120), // 空闲连接 120 秒过期
         ));
 
         // 加载已有的订阅规则
@@ -218,7 +220,8 @@ impl DnsHandler {
         // 先获取需要更新的订阅URL
         let enabled_subs: Vec<(String, String)> = {
             let config = self.config.lock().unwrap();
-            config.subscriptions
+            config
+                .subscriptions
                 .iter()
                 .filter(|s| s.enabled)
                 .map(|s| (s.name.clone(), s.url.clone()))
@@ -244,7 +247,8 @@ impl DnsHandler {
         for (name, rules) in results {
             if let Some(sub) = config.subscriptions.iter_mut().find(|s| s.name == name) {
                 sub.rules = rules;
-                sub.last_updated = Some(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
+                sub.last_updated =
+                    Some(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
             }
         }
 
@@ -279,7 +283,8 @@ impl DnsHandler {
                 let parts: Vec<&str> = line.split_whitespace().collect();
                 if parts.len() >= 2 {
                     let first = parts[0];
-                    if first == "0.0.0.0" || first == "127.0.0.1" || first == "::1" || first == "::" {
+                    if first == "0.0.0.0" || first == "127.0.0.1" || first == "::1" || first == "::"
+                    {
                         let domain = parts[1].to_lowercase().trim_end_matches('.').to_string();
                         if !domain.is_empty() && domain.contains('.') && !domain.starts_with('#') {
                             return Some(domain);
@@ -290,7 +295,7 @@ impl DnsHandler {
                 // 检查是否是纯域名格式 (AdGuard格式: ||domain.com^)
                 let line = line.trim();
                 if line.starts_with("||") && line.ends_with('^') {
-                    let domain = line[2..line.len()-1].to_lowercase();
+                    let domain = line[2..line.len() - 1].to_lowercase();
                     if domain.contains('.') {
                         return Some(domain);
                     }
@@ -311,11 +316,7 @@ impl DnsHandler {
         Ok(rules)
     }
 
-    pub async fn handle_query(
-        &self,
-        query_bytes: &[u8],
-        _src_addr: SocketAddr,
-    ) -> Option<Vec<u8>> {
+    pub async fn handle_query(&self, query_bytes: &[u8], _src_addr: SocketAddr) -> Option<Vec<u8>> {
         let start = Instant::now();
 
         let query = match Message::from_bytes(query_bytes) {
@@ -349,7 +350,9 @@ impl DnsHandler {
 
         // ① 自定义规则（最高优先级，覆盖一切订阅）
         let rule_result = self.check_rules(&query_name);
-        let is_whitelisted = rule_result.as_ref().map_or(false, |(action, _, _)| *action == RuleAction::Allow);
+        let is_whitelisted = rule_result
+            .as_ref()
+            .map_or(false, |(action, _, _)| *action == RuleAction::Allow);
         let mut forward_group: Option<String> = match rule_result {
             Some((RuleAction::Allow, _, _)) => {
                 // 白名单规则，跳过黑名单检查，直接放行
@@ -362,7 +365,12 @@ impl DnsHandler {
                 return Some(self.create_blocked_response(&query, &config.proxy.listen_address));
             }
             Some((RuleAction::BlockNxdomain, _, _)) => {
-                self.record_blocked(&query_name, &format!("{:?}", query_type), "rule:nxdomain", start);
+                self.record_blocked(
+                    &query_name,
+                    &format!("{:?}", query_type),
+                    "rule:nxdomain",
+                    start,
+                );
                 return Some(self.create_nxdomain_response(&query));
             }
             Some((RuleAction::Forward, _, ref target)) => target.clone(),
@@ -372,7 +380,12 @@ impl DnsHandler {
         // ② 黑名单订阅（自定义规则未命中或为白名单时跳过）
         if !is_whitelisted && forward_group.is_none() && self.is_blocked(&query_name) {
             let config = self.config.lock().unwrap();
-            self.record_blocked(&query_name, &format!("{:?}", query_type), "blocklist", start);
+            self.record_blocked(
+                &query_name,
+                &format!("{:?}", query_type),
+                "blocklist",
+                start,
+            );
             return Some(self.create_blocked_response(&query, &config.proxy.listen_address));
         }
 
@@ -410,10 +423,13 @@ impl DnsHandler {
                 }
             } else {
                 // 成为领导者，注册进行中查询
-                pending.insert(cache_key.clone(), PendingQueryState {
-                    waiters: Vec::new(),
-                    started_at: Instant::now(),
-                });
+                pending.insert(
+                    cache_key.clone(),
+                    PendingQueryState {
+                        waiters: Vec::new(),
+                        started_at: Instant::now(),
+                    },
+                );
             }
         }
 
@@ -432,7 +448,8 @@ impl DnsHandler {
 
         // 根据策略选择DNS服务器并转发（如有指定分组则过滤）
         let (response, server_name) = if let Some(ref group) = forward_group {
-            self.forward_with_strategy_for_group(query_bytes, group).await
+            self.forward_with_strategy_for_group(query_bytes, group)
+                .await
         } else {
             self.forward_with_strategy(query_bytes).await
         };
@@ -442,12 +459,8 @@ impl DnsHandler {
                 .ok()
                 .and_then(|m| {
                     m.answers().first().and_then(|a| {
-                        a.data().and_then(|d| {
-                            d.to_string()
-                                .split_whitespace()
-                                .last()
-                                .map(String::from)
-                        })
+                        a.data()
+                            .and_then(|d| d.to_string().split_whitespace().last().map(String::from))
                     })
                 })
                 .unwrap_or_else(|| "-".to_string());
@@ -567,14 +580,12 @@ impl DnsHandler {
             return self.forward_with_strategy(query_bytes).await;
         }
 
-        self.do_forward(query_bytes, &strategy, &group_servers).await
+        self.do_forward(query_bytes, &strategy, &group_servers)
+            .await
     }
 
     // 根据策略转发请求（使用全部启用的服务器）
-    async fn forward_with_strategy(
-        &self,
-        query_bytes: &[u8],
-    ) -> (Option<Vec<u8>>, String) {
+    async fn forward_with_strategy(&self, query_bytes: &[u8]) -> (Option<Vec<u8>>, String) {
         let (strategy, enabled_servers) = {
             let config = self.config.lock().unwrap();
             let enabled: Vec<_> = config
@@ -591,7 +602,8 @@ impl DnsHandler {
             return (None, "none".to_string());
         }
 
-        self.do_forward(query_bytes, &strategy, &enabled_servers).await
+        self.do_forward(query_bytes, &strategy, &enabled_servers)
+            .await
     }
 
     // 实际转发逻辑（供 forward_with_strategy 和 forward_with_strategy_for_group 共用）
@@ -632,7 +644,13 @@ impl DnsHandler {
                 }
 
                 // 回退到并发查询
-                let futures: Vec<std::pin::Pin<Box<dyn futures::Future<Output = Option<(Vec<u8>, String, Instant)>> + Send>>> = servers
+                let futures: Vec<
+                    std::pin::Pin<
+                        Box<
+                            dyn futures::Future<Output = Option<(Vec<u8>, String, Instant)>> + Send,
+                        >,
+                    >,
+                > = servers
                     .iter()
                     .map(|s| {
                         let s = s.clone();
@@ -641,7 +659,13 @@ impl DnsHandler {
                             let start = Instant::now();
                             let result = self.forward_to_server(&bytes, &s).await;
                             result.map(|r| (r, s.name.clone(), start))
-                        }) as std::pin::Pin<Box<dyn futures::Future<Output = Option<(Vec<u8>, String, Instant)>> + Send>>
+                        })
+                            as std::pin::Pin<
+                                Box<
+                                    dyn futures::Future<Output = Option<(Vec<u8>, String, Instant)>>
+                                        + Send,
+                                >,
+                            >
                     })
                     .collect();
 
@@ -657,7 +681,13 @@ impl DnsHandler {
             }
             DnsStrategy::Parallel => {
                 // 并行策略：同时发送到所有服务器，返回第一个成功的响应
-                let futures: Vec<std::pin::Pin<Box<dyn futures::Future<Output = Option<(Vec<u8>, String, Instant)>> + Send>>> = servers
+                let futures: Vec<
+                    std::pin::Pin<
+                        Box<
+                            dyn futures::Future<Output = Option<(Vec<u8>, String, Instant)>> + Send,
+                        >,
+                    >,
+                > = servers
                     .iter()
                     .map(|s| {
                         let s = s.clone();
@@ -666,7 +696,13 @@ impl DnsHandler {
                             let start = Instant::now();
                             let result = self.forward_to_server(&bytes, &s).await;
                             result.map(|r| (r, s.name.clone(), start))
-                        }) as std::pin::Pin<Box<dyn futures::Future<Output = Option<(Vec<u8>, String, Instant)>> + Send>>
+                        })
+                            as std::pin::Pin<
+                                Box<
+                                    dyn futures::Future<Output = Option<(Vec<u8>, String, Instant)>>
+                                        + Send,
+                                >,
+                            >
                     })
                     .collect();
 
@@ -700,7 +736,10 @@ impl DnsHandler {
     }
 
     // 获取历史延迟最低的服务器
-    fn get_fastest_server(&self, servers: &[crate::config::DnsServer]) -> Option<crate::config::DnsServer> {
+    fn get_fastest_server(
+        &self,
+        servers: &[crate::config::DnsServer],
+    ) -> Option<crate::config::DnsServer> {
         let latency_map = self.server_latency.lock().unwrap();
 
         let mut best_server: Option<crate::config::DnsServer> = None;
@@ -728,7 +767,8 @@ impl DnsHandler {
 
         match server.protocol {
             DnsProtocol::Udp | DnsProtocol::Tcp => {
-                self.forward_udp(&query_with_ecs, &server.ip, server.port).await
+                self.forward_udp(&query_with_ecs, &server.ip, server.port)
+                    .await
             }
             DnsProtocol::Doh => {
                 let url = server
@@ -829,18 +869,14 @@ impl DnsHandler {
         }
     }
 
-    async fn forward_udp(
-        &self,
-        query_bytes: &[u8],
-        ip: &str,
-        port: u16,
-    ) -> Option<Vec<u8>> {
+    async fn forward_udp(&self, query_bytes: &[u8], ip: &str, port: u16) -> Option<Vec<u8>> {
         let addr = format!("{}:{}", ip, port);
         self.pool.udp_query(&addr, query_bytes).await
     }
 
     async fn forward_doh(&self, query_bytes: &[u8], url: &str) -> Option<Vec<u8>> {
-        let response = self.http_client
+        let response = self
+            .http_client
             .post(url)
             .header("Content-Type", "application/dns-message")
             .header("Accept", "application/dns-message")
@@ -858,12 +894,7 @@ impl DnsHandler {
     }
 
     /// DoT (DNS-over-TLS) 转发（使用连接池复用 TLS 连接）
-    async fn forward_dot(
-        &self,
-        query_bytes: &[u8],
-        ip: &str,
-        port: u16,
-    ) -> Option<Vec<u8>> {
+    async fn forward_dot(&self, query_bytes: &[u8], ip: &str, port: u16) -> Option<Vec<u8>> {
         let addr = format!("{}:{}", ip, port);
 
         // 首次尝试：从连接池获取连接
@@ -936,8 +967,10 @@ impl DnsHandler {
             // 添加A记录指向0.0.0.0
             let record = Record::from_rdata(
                 q.name().clone(),
-                300,  // TTL 300秒
-                RData::A(trust_dns_client::rr::rdata::A(std::net::Ipv4Addr::new(0, 0, 0, 0))),
+                300, // TTL 300秒
+                RData::A(trust_dns_client::rr::rdata::A(std::net::Ipv4Addr::new(
+                    0, 0, 0, 0,
+                ))),
             );
             response.add_answer(record);
         }
@@ -958,7 +991,15 @@ impl DnsHandler {
         response.to_bytes().unwrap_or_default()
     }
 
-    fn record_success(&self, domain: &str, qtype: &str, response: &str, upstream: &str, latency: u64, group: &str) {
+    fn record_success(
+        &self,
+        domain: &str,
+        qtype: &str,
+        response: &str,
+        upstream: &str,
+        latency: u64,
+        group: &str,
+    ) {
         let mut stats = self.stats.lock().unwrap();
         stats.total_queries += 1;
         stats.total_latency_ms += latency;
@@ -993,7 +1034,10 @@ impl DnsHandler {
             traffic.record_latency(latency);
         }
 
-        info!("DNS查询: {} {} -> {} via {} ({}ms)", domain, qtype, response, upstream, latency);
+        info!(
+            "DNS查询: {} {} -> {} via {} ({}ms)",
+            domain, qtype, response, upstream, latency
+        );
     }
 
     fn record_blocked(&self, domain: &str, qtype: &str, upstream: &str, start: Instant) {
@@ -1102,7 +1146,8 @@ impl DnsHandler {
         let stats = self.stats.lock().unwrap();
 
         // 构建时间线数据
-        let timeline: Vec<TimeBucket> = traffic.minute_buckets
+        let timeline: Vec<TimeBucket> = traffic
+            .minute_buckets
             .iter()
             .map(|(time, (total, blocked, cached))| TimeBucket {
                 time: time.clone(),
@@ -1113,7 +1158,8 @@ impl DnsHandler {
             .collect();
 
         // 构建 Top 10 域名
-        let mut domain_vec: Vec<(String, u64)> = traffic.domain_counts
+        let mut domain_vec: Vec<(String, u64)> = traffic
+            .domain_counts
             .iter()
             .map(|(k, v)| (k.clone(), *v))
             .collect();
@@ -1125,7 +1171,14 @@ impl DnsHandler {
             .collect();
 
         // 构建延迟分布
-        let latency_ranges = ["0-10ms", "10-50ms", "50-100ms", "100-200ms", "200-500ms", "500ms+"];
+        let latency_ranges = [
+            "0-10ms",
+            "10-50ms",
+            "50-100ms",
+            "100-200ms",
+            "200-500ms",
+            "500ms+",
+        ];
         let latency_dist: Vec<LatencyDistribution> = latency_ranges
             .iter()
             .zip(traffic.latency_buckets.iter())
@@ -1136,7 +1189,8 @@ impl DnsHandler {
             .collect();
 
         // 计算 QPS
-        let elapsed_secs = traffic.start_time
+        let elapsed_secs = traffic
+            .start_time
             .map(|t| t.elapsed().as_secs_f64())
             .unwrap_or(1.0);
         let qps = if elapsed_secs > 0.0 {
@@ -1261,7 +1315,8 @@ impl TrafficStatsCollector {
         // 只保留 Top 100 域名，避免内存溢出
         if self.domain_counts.len() > 100 {
             // 找到最小计数并移除
-            if let Some(min_domain) = self.domain_counts
+            if let Some(min_domain) = self
+                .domain_counts
                 .iter()
                 .min_by_key(|(_, count)| *count)
                 .map(|(domain, _)| domain.clone())

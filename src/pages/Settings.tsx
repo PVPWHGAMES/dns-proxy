@@ -1,6 +1,8 @@
 import { useState, useEffect } from "react";
 import { Save, Plus, Trash2, Server, Wifi, Database, Zap, RefreshCw, Timer, Monitor } from "lucide-react";
 import { api, AppConfig, DnsServer, DnsProtocol, DnsStrategy, DnsLatencyResult, ServerGroup } from "../lib/api";
+import MessageBanner from "../components/ui/MessageBanner";
+import Badge from "../components/ui/Badge";
 
 export default function Settings() {
   const [config, setConfig] = useState<AppConfig | null>(null);
@@ -189,17 +191,7 @@ export default function Settings() {
   return (
     <div className="space-y-6">
       {/* 消息提示 */}
-      {message && (
-        <div
-          className={`p-4 rounded-lg ${
-            message.type === "success"
-              ? "bg-green-100 text-green-700 border border-green-200"
-              : "bg-red-100 text-red-700 border border-red-200"
-          }`}
-        >
-          {message.text}
-        </div>
-      )}
+      {message && <MessageBanner type={message.type} text={message.text} />}
 
       {/* 监听设置 */}
       <div className="bg-card rounded-xl border">
@@ -280,7 +272,19 @@ export default function Settings() {
               />
               <div>
                 <p className="text-sm font-medium">开机自启动</p>
-                <p className="text-xs text-muted-foreground">Windows 启动时自动运行 DNS Proxy</p>
+                <p className="text-xs text-muted-foreground">Windows 启动时自动运行果冻网络加速</p>
+              </div>
+            </label>
+            <label className="flex items-center gap-3 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={config.start_minimized}
+                onChange={(e) => setConfig({ ...config, start_minimized: e.target.checked })}
+                className="w-4 h-4"
+              />
+              <div>
+                <p className="text-sm font-medium">启动后最小化</p>
+                <p className="text-xs text-muted-foreground">启动后隐藏到系统托盘，可通过托盘恢复窗口</p>
               </div>
             </label>
             <label className="flex items-center gap-3 cursor-pointer">
@@ -529,9 +533,7 @@ export default function Settings() {
                         <span className="text-red-500 text-xs">{result.error || "失败"}</span>
                       )}
                       {index === 0 && result.latency_ms !== undefined && (
-                        <span className="text-xs bg-green-100 text-green-700 px-1.5 py-0.5 rounded">
-                          最快
-                        </span>
+                        <Badge variant="success" className="text-[10px]">最快</Badge>
                       )}
                     </div>
                   </div>

@@ -5,6 +5,7 @@ import {
   Loader2,
 } from "lucide-react";
 import { api, TunConfig } from "../lib/api";
+import MessageBanner from "../components/ui/MessageBanner";
 
 export default function NetworkSettings() {
   const [loading, setLoading] = useState(false);
@@ -62,15 +63,7 @@ export default function NetworkSettings() {
   return (
     <div className="space-y-6">
       {/* 消息提示 */}
-      {message && (
-        <div className={`p-4 rounded-lg ${
-          message.type === "success"
-            ? "bg-green-100 text-green-700 border border-green-200"
-            : "bg-red-100 text-red-700 border border-red-200"
-        }`}>
-          {message.text}
-        </div>
-      )}
+      {message && <MessageBanner type={message.type} text={message.text} />}
 
       {/* TUN配置 */}
       <div className="bg-card rounded-xl border">

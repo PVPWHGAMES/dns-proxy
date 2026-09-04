@@ -5,11 +5,13 @@ mod tun;
 use config::AppConfig;
 use dns::server::DnsServer;
 use dns::{CacheStats, DnsQueryLog, DnsStats, PoolStats, TrafficStats};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Manager, State};
 use tokio::sync::Mutex;
+use tracing_subscriber::prelude::*;
 use tun::device::TunDevice;
 use tun::dns_intercept::DnsInterceptor;
 use tun::{TunConfig, TunStatus};
@@ -272,8 +274,16 @@ async fn get_tun_status(state: State<'_, AppState>) -> Result<TunStatus, String>
     Ok(TunStatus {
         active,
         starting: *starting,
-        interface_name: if active { config.interface_name.clone() } else { String::new() },
-        ip_address: if active { config.gateway.clone() } else { String::new() },
+        interface_name: if active {
+            config.interface_name.clone()
+        } else {
+            String::new()
+        },
+        ip_address: if active {
+            config.gateway.clone()
+        } else {
+            String::new()
+        },
         dns_redirected: active,
         packets_processed: 0,
     })
@@ -290,7 +300,12 @@ struct DnsLatencyResult {
 #[tauri::command]
 async fn test_dns_latency(state: State<'_, AppState>) -> Result<Vec<DnsLatencyResult>, String> {
     let config = state.config.lock().await;
-    let servers: Vec<_> = config.upstream.iter().filter(|s| s.enabled).cloned().collect();
+    let servers: Vec<_> = config
+        .upstream
+        .iter()
+        .filter(|s| s.enabled)
+        .cloned()
+        .collect();
     drop(config);
 
     let results = run_latency_test(&servers).await;
@@ -307,7 +322,9 @@ async fn test_dns_latency(state: State<'_, AppState>) -> Result<Vec<DnsLatencyRe
 }
 
 #[tauri::command]
-async fn get_latency_results(state: State<'_, AppState>) -> Result<(Vec<DnsLatencyResult>, Option<String>), String> {
+async fn get_latency_results(
+    state: State<'_, AppState>,
+) -> Result<(Vec<DnsLatencyResult>, Option<String>), String> {
     let results = state.latency_results.lock().await.clone();
     let last_test = state.latency_last_test.lock().await.clone();
     Ok((results, last_test))
@@ -324,38 +341,48 @@ struct UpdateInfo {
     published_at: String,
 }
 
-/// 检查 GitHub 是否有新版本
-/// 检查程序是否已注册开机自启动
+/// 检查程序是否已注册开机自启动（计划任务）
 #[tauri::command]
 fn is_autostart_enabled() -> Result<bool, String> {
-    use winreg::enums::*;
-    let hkcu = winreg::RegKey::predef(HKEY_CURRENT_USER);
-    let run_key = hkcu
-        .open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Run")
-        .map_err(|e| format!("无法读取注册表: {}", e))?;
-    let value: Option<String> = run_key.get_value("DNSProxy").ok();
-    Ok(value.is_some())
+    let output = std::process::Command::new("schtasks")
+        .args(["/Query", "/TN", "DNS Proxy"])
+        .output()
+        .map_err(|e| format!("查询计划任务失败: {}", e))?;
+    Ok(output.status.success())
 }
 
-/// 设置或取消开机自启动
+/// 设置或取消开机自启动（计划任务，登录时以最高权限静默启动，不弹 UAC）
 #[tauri::command]
 fn set_autostart(enabled: bool) -> Result<(), String> {
-    use winreg::enums::*;
-    let hkcu = winreg::RegKey::predef(HKEY_CURRENT_USER);
-    let (run_key, _) = hkcu
-        .create_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Run")
-        .map_err(|e| format!("无法写入注册表: {}", e))?;
+    let exe_path = std::env::current_exe()
+        .map_err(|e| format!("无法获取程序路径: {}", e))?
+        .to_string_lossy()
+        .to_string();
+
     if enabled {
-        let exe_path = std::env::current_exe().map_err(|e| format!("无法获取程序路径: {}", e))?;
-        let path_str = exe_path.to_string_lossy();
-        // 路径包含空格时需要用引号包裹
-        let value = format!("\"{}\"", path_str.replace('"', ""));
-        run_key
-            .set_value("DNSProxy", &value)
-            .map_err(|e| format!("设置自启动失败: {}", e))?;
+        let task_command = format!("\"{}\"", exe_path);
+        let output = std::process::Command::new("schtasks")
+            .args([
+                "/Create",
+                "/TN", "DNS Proxy",
+                "/TR", &task_command,
+                "/SC", "ONLOGON",
+                "/RL", "HIGHEST",
+                "/F",
+            ])
+            .output()
+            .map_err(|e| format!("创建计划任务失败: {}", e))?;
+        if !output.status.success() {
+            return Err(format!(
+                "创建计划任务失败: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
     } else {
-        // 删除键值（忽略键不存在的错误）
-        let _ = run_key.delete_value("DNSProxy");
+        // 删除任务，任务不存在也视为成功
+        let _ = std::process::Command::new("schtasks")
+            .args(["/Delete", "/TN", "DNS Proxy", "/F"])
+            .output();
     }
     Ok(())
 }
@@ -408,20 +435,11 @@ async fn check_update() -> Result<UpdateInfo, String> {
         .trim_start_matches('v')
         .to_string();
 
-    let release_url = release["html_url"]
-        .as_str()
-        .unwrap_or("")
-        .to_string();
+    let release_url = release["html_url"].as_str().unwrap_or("").to_string();
 
-    let release_notes = release["body"]
-        .as_str()
-        .unwrap_or("无更新说明")
-        .to_string();
+    let release_notes = release["body"].as_str().unwrap_or("无更新说明").to_string();
 
-    let published_at = release["published_at"]
-        .as_str()
-        .unwrap_or("")
-        .to_string();
+    let published_at = release["published_at"].as_str().unwrap_or("").to_string();
 
     // 比较版本号
     let has_update = compare_versions(&current_version, &latest_version);
@@ -438,11 +456,8 @@ async fn check_update() -> Result<UpdateInfo, String> {
 
 /// 比较版本号，如果 latest > current 返回 true
 fn compare_versions(current: &str, latest: &str) -> bool {
-    let parse_version = |v: &str| -> Vec<u32> {
-        v.split('.')
-            .filter_map(|s| s.parse().ok())
-            .collect()
-    };
+    let parse_version =
+        |v: &str| -> Vec<u32> { v.split('.').filter_map(|s| s.parse().ok()).collect() };
 
     let current_parts = parse_version(current);
     let latest_parts = parse_version(latest);
@@ -579,11 +594,14 @@ async fn test_dot_connection(ip: &str, port: u16, query: &[u8]) -> Result<Vec<u8
     let addr = format!("{}:{}", ip, port);
 
     // 建立 TCP 连接
-    let tcp = match tokio::time::timeout(std::time::Duration::from_secs(3), TcpStream::connect(&addr)).await {
-        Ok(Ok(stream)) => stream,
-        Ok(Err(e)) => return Err(format!("TCP连接失败: {}", e)),
-        Err(_) => return Err("TCP连接超时".to_string()),
-    };
+    let tcp =
+        match tokio::time::timeout(std::time::Duration::from_secs(3), TcpStream::connect(&addr))
+            .await
+        {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(e)) => return Err(format!("TCP连接失败: {}", e)),
+            Err(_) => return Err("TCP连接超时".to_string()),
+        };
 
     // 配置 TLS
     let mut root_store = rustls::RootCertStore::empty();
@@ -598,7 +616,12 @@ async fn test_dot_connection(ip: &str, port: u16, query: &[u8]) -> Result<Vec<u8
     let domain = rustls::pki_types::ServerName::try_from(ip.to_string())
         .map_err(|e| format!("无效域名: {}", e))?;
 
-    let mut tls = match tokio::time::timeout(std::time::Duration::from_secs(3), connector.connect(domain, tcp)).await {
+    let mut tls = match tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        connector.connect(domain, tcp),
+    )
+    .await
+    {
         Ok(Ok(stream)) => stream,
         Ok(Err(e)) => return Err(format!("TLS握手失败: {}", e)),
         Err(_) => return Err("TLS握手超时".to_string()),
@@ -606,12 +629,18 @@ async fn test_dot_connection(ip: &str, port: u16, query: &[u8]) -> Result<Vec<u8
 
     // 发送 DNS 查询（DoT 使用 TCP 格式：2字节长度前缀 + 查询数据）
     let len = (query.len() as u16).to_be_bytes();
-    tls.write_all(&len).await.map_err(|e| format!("发送长度失败: {}", e))?;
-    tls.write_all(query).await.map_err(|e| format!("发送查询失败: {}", e))?;
+    tls.write_all(&len)
+        .await
+        .map_err(|e| format!("发送长度失败: {}", e))?;
+    tls.write_all(query)
+        .await
+        .map_err(|e| format!("发送查询失败: {}", e))?;
 
     // 读取响应长度
     let mut len_buf = [0u8; 2];
-    tls.read_exact(&mut len_buf).await.map_err(|e| format!("读取响应长度失败: {}", e))?;
+    tls.read_exact(&mut len_buf)
+        .await
+        .map_err(|e| format!("读取响应长度失败: {}", e))?;
     let resp_len = u16::from_be_bytes(len_buf) as usize;
 
     if resp_len > 4096 {
@@ -620,7 +649,12 @@ async fn test_dot_connection(ip: &str, port: u16, query: &[u8]) -> Result<Vec<u8
 
     // 读取响应数据
     let mut resp_buf = vec![0u8; resp_len];
-    match tokio::time::timeout(std::time::Duration::from_secs(3), tls.read_exact(&mut resp_buf)).await {
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        tls.read_exact(&mut resp_buf),
+    )
+    .await
+    {
         Ok(Ok(_)) => Ok(resp_buf),
         Ok(Err(e)) => Err(format!("读取响应失败: {}", e)),
         Err(_) => Err("读取响应超时".to_string()),
@@ -667,20 +701,66 @@ fn build_dns_query(domain: &str) -> Vec<u8> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
-
     let config = AppConfig::load();
+    let log_dir = AppConfig::config_path()
+        .parent()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let log_file = config
+        .log
+        .file
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| log_dir.join("tun-diagnostics.log"));
+    let log_file = if log_file.is_absolute() {
+        log_file
+    } else {
+        log_dir.join(log_file)
+    };
+
+    // 日志文件仅用于诊断，按天轮转，避免应用运行期间阻塞 TUN 启动。
+    let _log_guard = match std::fs::create_dir_all(log_file.parent().unwrap_or(&log_dir)) {
+        Ok(()) => {
+            let file_name = log_file
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("tun-diagnostics.log");
+            let file_dir = log_file.parent().unwrap_or(&log_dir);
+            let appender = tracing_appender::rolling::daily(file_dir, file_name);
+            let (file_writer, guard) = tracing_appender::non_blocking(appender);
+            let file_layer = tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(file_writer);
+            let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&config.log.level));
+            let _ = tracing_subscriber::registry()
+                .with(filter)
+                .with(tracing_subscriber::fmt::layer())
+                .with(file_layer)
+                .try_init();
+            Some(guard)
+        }
+        Err(error) => {
+            eprintln!("创建诊断日志目录失败: {}", error);
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&config.log.level)),
+                )
+                .try_init()
+                .ok();
+            None
+        }
+    };
+
+    tracing::info!(path = %log_file.display(), "诊断日志已初始化");
     let server = DnsServer::new(config.clone());
     let tun_config = config.tun.clone();
     let tun_device = TunDevice::new(tun_config.clone());
 
     let latency_results = Arc::new(Mutex::new(Vec::new()));
     let latency_last_test = Arc::new(Mutex::new(None));
+    let start_minimized = config.start_minimized;
 
     // 如果 TUN 配置为启用，初始化时就设置启动中状态
     let tun_starting = Arc::new(Mutex::new(tun_config.enabled));
@@ -698,7 +778,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(state)
-        .setup(|app| {
+        .setup(move |app| {
             // 创建系统托盘菜单
             let dns_status = MenuItemBuilder::with_id("dns_status", "DNS: 检查中...")
                 .enabled(false)
@@ -709,16 +789,12 @@ pub fn run() {
             let latency_info = MenuItemBuilder::with_id("latency_info", "延迟: 未测试")
                 .enabled(false)
                 .build(app)?;
-            let restart_dns = MenuItemBuilder::with_id("restart_dns", "重启 DNS 服务")
-                .build(app)?;
-            let restart_tun = MenuItemBuilder::with_id("restart_tun", "重启 TUN")
-                .build(app)?;
-            let test_latency = MenuItemBuilder::with_id("test_latency", "测试延迟")
-                .build(app)?;
-            let show_window = MenuItemBuilder::with_id("show_window", "显示窗口")
-                .build(app)?;
-            let quit = MenuItemBuilder::with_id("quit", "退出")
-                .build(app)?;
+            let restart_dns =
+                MenuItemBuilder::with_id("restart_dns", "重启 DNS 服务").build(app)?;
+            let restart_tun = MenuItemBuilder::with_id("restart_tun", "重启 TUN").build(app)?;
+            let test_latency = MenuItemBuilder::with_id("test_latency", "测试延迟").build(app)?;
+            let show_window = MenuItemBuilder::with_id("show_window", "显示窗口").build(app)?;
+            let quit = MenuItemBuilder::with_id("quit", "退出").build(app)?;
 
             let menu = MenuBuilder::new(app)
                 .item(&dns_status)
@@ -777,13 +853,19 @@ pub fn run() {
                             tauri::async_runtime::spawn(async move {
                                 let servers = {
                                     let config = config.lock().await;
-                                    config.upstream.iter().filter(|s| s.enabled).cloned().collect::<Vec<_>>()
+                                    config
+                                        .upstream
+                                        .iter()
+                                        .filter(|s| s.enabled)
+                                        .cloned()
+                                        .collect::<Vec<_>>()
                                 };
                                 let results = run_latency_test(&servers).await;
                                 let mut saved = latency_results.lock().await;
                                 *saved = results;
                                 let mut last_test = latency_last_test.lock().await;
-                                *last_test = Some(chrono::Local::now().format("%H:%M:%S").to_string());
+                                *last_test =
+                                    Some(chrono::Local::now().format("%H:%M:%S").to_string());
                             });
                         }
                         "show_window" => {
@@ -813,6 +895,14 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
+
+            if start_minimized {
+                if let Some(window) = app.get_webview_window("main") {
+                    if let Err(error) = window.hide() {
+                        tracing::error!(%error, "启动时隐藏主窗口失败");
+                    }
+                }
+            }
 
             // 自动启动 DNS 服务（应用启动时始终启动）
             let app_handle_startup = app.handle().clone();
@@ -918,11 +1008,9 @@ pub fn run() {
                         } else {
                             let fastest = results.iter().find(|r| r.latency_ms.is_some());
                             match fastest {
-                                Some(r) => format!(
-                                    "最快: {} ({}ms)",
-                                    r.name,
-                                    r.latency_ms.unwrap()
-                                ),
+                                Some(r) => {
+                                    format!("最快: {} ({}ms)", r.name, r.latency_ms.unwrap())
+                                }
                                 None => "延迟: 全部失败".to_string(),
                             }
                         }
@@ -955,7 +1043,12 @@ pub fn run() {
                         let state = app_handle_auto.state::<AppState>();
                         let servers = {
                             let config = state.config.lock().await;
-                            config.upstream.iter().filter(|s| s.enabled).cloned().collect::<Vec<_>>()
+                            config
+                                .upstream
+                                .iter()
+                                .filter(|s| s.enabled)
+                                .cloned()
+                                .collect::<Vec<_>>()
                         };
                         let results = run_latency_test(&servers).await;
                         let mut saved = state.latency_results.lock().await;

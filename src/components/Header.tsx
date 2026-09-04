@@ -7,6 +7,8 @@ const pageTitles: Record<string, string> = {
   "/settings": "DNS 设置",
   "/rules": "规则管理",
   "/logs": "日志查看",
+  "/network": "网络设置",
+  "/about": "关于",
 };
 
 export default function Header() {
@@ -27,7 +29,7 @@ export default function Header() {
     document.documentElement.classList.toggle("dark");
   };
 
-  const pageTitle = pageTitles[location.pathname] || "DNS Proxy";
+  const pageTitle = pageTitles[location.pathname] || "果冻网络加速";
 
   return (
     <header className="h-16 border-b bg-card flex items-center justify-between px-6">
@@ -50,7 +52,7 @@ export default function Header() {
         {/* 主题切换 */}
         <button
           onClick={toggleTheme}
-          className="p-2 rounded-lg hover:bg-accent transition-colors"
+          className="p-2 rounded-lg hover:bg-accent active:scale-95 transition-colors"
           title={isDark ? "切换到浅色模式" : "切换到深色模式"}
         >
           {isDark ? (

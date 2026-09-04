@@ -42,7 +42,8 @@ pub struct DnsCache {
 
 impl DnsCache {
     pub fn new(max_size: usize, default_ttl: Duration) -> Self {
-        let capacity = NonZeroUsize::new(max_size.max(1)).unwrap_or(NonZeroUsize::new(1000).unwrap());
+        let capacity =
+            NonZeroUsize::new(max_size.max(1)).unwrap_or(NonZeroUsize::new(1000).unwrap());
         Self {
             entries: Mutex::new(LruCache::new(capacity)),
             max_size,
