@@ -104,6 +104,19 @@ pub struct ProxyConfig {
     /// 启动服务时把系统网卡的 DNS 指向本地代理，停止/退出时还原
     #[serde(default = "default_takeover")]
     pub takeover_system_dns: bool,
+    /// DoH 主机名的引导解析服务器
+    ///
+    /// DoH 上游只给域名时，必须先解析出它的地址才能建立 DoH 连接；而此时系统 DNS
+    /// 往往已指向本程序，走系统解析器就会递归回自身。这里直连这几台服务器解析。
+    ///
+    /// 缺省值是两台国内公共 DNS：它们只用来解析 DoH 主机名，不参与正常查询。
+    #[serde(default = "default_bootstrap_dns")]
+    pub bootstrap_dns: Vec<String>,
+}
+
+/// 引导解析服务器的默认值：阿里 DNS 与 DNSPod
+fn default_bootstrap_dns() -> Vec<String> {
+    vec!["223.5.5.5".to_string(), "119.29.29.29".to_string()]
 }
 
 fn default_takeover() -> bool {
@@ -223,6 +236,7 @@ impl Default for AppConfig {
                 block_ipv6: false,
                 default_group: "domestic".to_string(),
                 takeover_system_dns: true,
+                bootstrap_dns: default_bootstrap_dns(),
             },
             upstream: vec![
                 DnsServer {
@@ -327,6 +341,29 @@ impl AppConfig {
         if !matches!(self.proxy.protocol.as_str(), "udp" | "tcp" | "both") {
             self.proxy.protocol = "udp".to_string();
             changed = true;
+        }
+
+        // 引导服务器写错会让 DoH 主机名解析不出去：统一修剪、去重并丢掉无效项。
+        // 全被丢空时补回默认值——空列表等于放弃引导解析，不该由一次笔误造成。
+        {
+            let before = self.proxy.bootstrap_dns.clone();
+            let mut cleaned: Vec<String> = Vec::new();
+            for entry in &before {
+                let trimmed = entry.trim();
+                if trimmed.is_empty() || crate::dns::bootstrap::parse_server(trimmed).is_none() {
+                    continue;
+                }
+                if !cleaned.iter().any(|existing| existing == trimmed) {
+                    cleaned.push(trimmed.to_string());
+                }
+            }
+            if cleaned.is_empty() {
+                cleaned = default_bootstrap_dns();
+            }
+            if cleaned != before {
+                self.proxy.bootstrap_dns = cleaned;
+                changed = true;
+            }
         }
 
         // 域名路由已停用时清掉对应的订阅及其缓存的规则
@@ -450,6 +487,73 @@ mod tests {
         let before = config.proxy.listen_address.clone();
         config.normalize();
         assert_eq!(config.proxy.listen_address, before);
+    }
+
+    #[test]
+    fn bootstrap_dns_defaults_to_two_public_resolvers() {
+        assert_eq!(
+            AppConfig::default().proxy.bootstrap_dns,
+            vec!["223.5.5.5".to_string(), "119.29.29.29".to_string()]
+        );
+    }
+
+    /// 老配置里没有这个字段时必须补上默认值，而不是留空导致 DoH 解析不出去
+    #[test]
+    fn bootstrap_dns_is_filled_in_for_configs_that_lack_the_field() {
+        // 用默认配置序列化出真实 TOML，再删掉这一行，模拟升级前写下的配置文件。
+        // 手写一段精简 TOML 是不行的：AppConfig 还有若干没有默认值的字段。
+        let text = toml::to_string(&AppConfig::default()).expect("默认配置应可序列化");
+        let without_field = text
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("bootstrap_dns"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !without_field.contains("bootstrap_dns"),
+            "前置条件失败：样例里仍有该字段"
+        );
+
+        let config: AppConfig = toml::from_str(&without_field).expect("老配置应当能解析");
+        assert_eq!(
+            config.proxy.bootstrap_dns,
+            default_bootstrap_dns(),
+            "缺少 bootstrap_dns 字段时应使用默认值"
+        );
+    }
+
+    #[test]
+    fn normalize_cleans_bootstrap_dns_entries() {
+        let mut config = AppConfig::default();
+        config.proxy.bootstrap_dns = vec![
+            " 223.5.5.5 ".to_string(),
+            "223.5.5.5".to_string(),
+            "".to_string(),
+            "dns.example.com".to_string(),
+            "119.29.29.29:5353".to_string(),
+        ];
+
+        assert!(config.normalize(), "修剪与去重应被视为配置改动");
+        assert_eq!(
+            config.proxy.bootstrap_dns,
+            vec!["223.5.5.5".to_string(), "119.29.29.29:5353".to_string()],
+            "应修剪空白、去掉重复与非法项，保留合法写法"
+        );
+
+        // 再规范化一次不该再有改动
+        assert!(!config.normalize(), "规范化应当是幂等的");
+    }
+
+    #[test]
+    fn normalize_restores_defaults_when_bootstrap_dns_is_empty() {
+        let mut config = AppConfig::default();
+        config.proxy.bootstrap_dns = vec!["不是地址".to_string()];
+
+        assert!(config.normalize());
+        assert_eq!(
+            config.proxy.bootstrap_dns,
+            vec!["223.5.5.5".to_string(), "119.29.29.29".to_string()],
+            "全部无效时应补回默认值，而不是留下空列表放弃引导解析"
+        );
     }
 
     fn subscription(name: &str, sub_type: SubscriptionType) -> Subscription {

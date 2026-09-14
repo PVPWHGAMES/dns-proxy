@@ -341,6 +341,22 @@ export default function Settings() {
             </div>
           </div>
 
+          {/* DoH 引导解析服务器 */}
+          <div>
+            <label className="block text-sm font-medium mb-2">DoH 引导解析服务器</label>
+            <BootstrapDnsInput
+              value={config.proxy.bootstrap_dns ?? []}
+              onChange={(bootstrap_dns) =>
+                setConfig({ ...config, proxy: { ...config.proxy, bootstrap_dns } })
+              }
+            />
+            <p className="text-xs text-muted-foreground mt-1">
+              只用来解析 DoH 上游的主机名。系统 DNS 已指向本程序时不能再走系统解析器，
+              否则会递归回自身、DoH 直接不可用。逗号或空格分隔，可带端口如
+              <code className="mx-1">223.5.5.5:53</code>。
+            </p>
+          </div>
+
           {/* 系统 DNS 接管 */}
           <div className="border rounded-lg p-3 space-y-3">
             <label className="flex items-start gap-3 cursor-pointer">
@@ -933,5 +949,53 @@ export default function Settings() {
         </button>
       </div>
     </div>
+  );
+}
+
+/**
+ * 引导服务器输入框
+ *
+ * 内部持有文本草稿、失焦时才提交：直接把它绑定成 `join(", ")` 的受控输入会有个
+ * 讨厌的副作用——刚敲下的逗号或空格立刻被规范化掉，导致第二个地址根本敲不进去。
+ */
+function BootstrapDnsInput({
+  value,
+  onChange,
+}: {
+  value: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const [draft, setDraft] = useState(value.join(", "));
+  const serialized = value.join(",");
+
+  // 外部值变化（配置加载完成、保存后回读）时同步草稿；打字过程中父组件的值不变，
+  // 所以这里的同步不会打断输入
+  useEffect(() => {
+    setDraft(value.join(", "));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serialized]);
+
+  const commit = () => {
+    const next = draft
+      .split(/[,，;\s]+/)
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0);
+    onChange(next);
+    setDraft(next.join(", "));
+  };
+
+  return (
+    <input
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.currentTarget.blur();
+        }
+      }}
+      placeholder="223.5.5.5, 119.29.29.29"
+      className="w-full px-3 py-2 border rounded-lg bg-background"
+    />
   );
 }

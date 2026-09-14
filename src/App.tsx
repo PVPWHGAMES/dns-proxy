@@ -4,6 +4,8 @@ import Dashboard from "./pages/Dashboard";
 import Settings from "./pages/Settings";
 import Rules from "./pages/Rules";
 import Logs from "./pages/Logs";
+import FlowMonitor from "./pages/FlowMonitor";
+import Redirect from "./pages/Redirect";
 
 import About from "./pages/About";
 
@@ -17,6 +19,8 @@ function App() {
 
           <Route path="/rules" element={<Rules />} />
           <Route path="/logs" element={<Logs />} />
+          <Route path="/flows" element={<FlowMonitor />} />
+          <Route path="/redirect" element={<Redirect />} />
           <Route path="/about" element={<About />} />
         </Routes>
       </Layout>

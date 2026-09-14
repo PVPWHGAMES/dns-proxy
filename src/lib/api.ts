@@ -30,6 +30,8 @@ export interface ProxyConfig {
   default_group: string;
   /** 启动服务时把系统网卡 DNS 指向本代理，停止/退出时还原 */
   takeover_system_dns: boolean;
+  /** DoH 主机名的引导解析服务器（系统 DNS 已指向本程序时不能再走系统解析器） */
+  bootstrap_dns: string[];
 }
 
 export interface Rule {
@@ -161,6 +163,82 @@ export interface DnsTakeoverStatus {
   enabled: boolean;
 }
 
+/** 一条活动流（FLOW 层只读观察） */
+export interface FlowEntry {
+  endpoint_id: number;
+  process_id: number;
+  process_name: string;
+  /** TCP / UDP / ICMP / ICMPv6 / 协议 n */
+  protocol: string;
+  local_addr: string;
+  local_port: number;
+  remote_addr: string;
+  remote_port: number;
+  outbound: boolean;
+  loopback: boolean;
+  established_at: string;
+}
+
+export interface FlowMonitorStatus {
+  running: boolean;
+  /** WinDivert 运行库是否就位 */
+  available: boolean;
+  /** 失败原因，例如需要管理员权限 */
+  message?: string | null;
+  active_count: number;
+  total_established: number;
+  total_deleted: number;
+  process_count: number;
+}
+
+/** 重定向规则状态（四个分支的计数器） */
+export interface RedirectStatus {
+  running: boolean;
+  available: boolean;
+  message?: string | null;
+  rule?: {
+    target: string;
+    relay_port: number;
+    sentinel_port: number;
+  } | null;
+  /** 分支 1：客户端 → 中继 */
+  to_relay: number;
+  /** 分支 2：中继 → 客户端 */
+  to_client: number;
+  /** 分支 3：中继拨号被映射到真实目标 */
+  dial_mapped: number;
+  /** 分支 4：目标回包被映射回哨兵端口 */
+  reply_mapped: number;
+  passed_through: number;
+  skipped: number;
+  send_failed: number;
+}
+
+export interface RelayStatus {
+  running: boolean;
+  listen_addr?: string | null;
+  destination?: string | null;
+  accepted: number;
+  active: number;
+  bytes_up: number;
+  bytes_down: number;
+  last_error?: string | null;
+}
+
+export interface RedirectOverview {
+  redirect: RedirectStatus;
+  relay: RelayStatus;
+}
+
+export interface RedirectRequest {
+  target_addr: string;
+  target_port: number;
+  /** 中继绑定的本机地址，必须是面向客户端的网卡地址 */
+  relay_bind: string;
+  relay_port: number;
+  sentinel_port: number;
+}
+
 export const api = {
   async getConfig(): Promise<AppConfig> {
     return await invoke("get_config");
@@ -246,5 +324,35 @@ export const api = {
 
   async setAutostart(enabled: boolean): Promise<void> {
     return await invoke("set_autostart", { enabled });
+  },
+
+  // FLOW 层只读观察（不修改、不丢弃、不注入任何数据包）
+  async startFlowMonitor(): Promise<FlowMonitorStatus> {
+    return await invoke("start_flow_monitor");
+  },
+
+  async stopFlowMonitor(): Promise<FlowMonitorStatus> {
+    return await invoke("stop_flow_monitor");
+  },
+
+  async getFlowMonitorStatus(): Promise<FlowMonitorStatus> {
+    return await invoke("get_flow_monitor_status");
+  },
+
+  async getActiveFlows(): Promise<FlowEntry[]> {
+    return await invoke("get_active_flows");
+  },
+
+  // 最小重定向（实验性，单目标，默认不启动）
+  async startRedirect(request: RedirectRequest): Promise<RedirectOverview> {
+    return await invoke("start_redirect", { request });
+  },
+
+  async stopRedirect(): Promise<RedirectOverview> {
+    return await invoke("stop_redirect");
+  },
+
+  async getRedirectStatus(): Promise<RedirectOverview> {
+    return await invoke("get_redirect_status");
   },
 };

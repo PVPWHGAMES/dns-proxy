@@ -216,12 +216,12 @@ impl DnsHandler {
             .pool_idle_timeout(Duration::from_secs(90));
 
         // 在系统 DNS 切换到本地代理前固定 DoH 上游地址，避免解析 DoH 主机名时递归回自身。
-        // 借用一段短锁读出上游列表，读完立刻释放，不把锁带进后面的 await。
-        let upstream = {
+        // 借用一段短锁读出上游列表与引导服务器，读完立刻释放，不把锁带进后面的 await。
+        let (upstream, bootstrap_servers) = {
             let guard = config
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            guard.upstream.clone()
+            (guard.upstream.clone(), guard.proxy.bootstrap_dns.clone())
         };
 
         for server in upstream
@@ -250,6 +250,13 @@ impl DnsHandler {
                 .ok()
                 .map(|ip| SocketAddr::new(ip, port))
                 .or_else(|| {
+                    // 先直连配置的引导服务器：系统 DNS 此时很可能已指向本程序，
+                    // 走系统解析器就会递归回自身，这正是过去解析不出来的原因。
+                    crate::dns::bootstrap::resolve_ipv4_default(host, &bootstrap_servers)
+                        .map(|ip| SocketAddr::new(IpAddr::V4(ip), port))
+                })
+                .or_else(|| {
+                    // 兜底才交给系统解析器
                     (host, port)
                         .to_socket_addrs()
                         .ok()
@@ -261,7 +268,7 @@ impl DnsHandler {
                 info!("DoH bootstrap 地址已固定: {} -> {}", host, addr);
             } else {
                 warn!(
-                    "无法解析 DoH bootstrap 地址，可能触发本地 DNS 递归: {}",
+                    "无法解析 DoH bootstrap 地址，可能触发本地 DNS 递归: {}（可在设置里配置引导解析服务器）",
                     doh_url
                 );
             }

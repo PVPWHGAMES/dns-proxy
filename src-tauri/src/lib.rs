@@ -1,6 +1,9 @@
 mod config;
 mod dns;
+pub mod redirect_session;
+pub mod relay;
 mod system_dns;
+pub mod windivert;
 
 use config::AppConfig;
 use dns::server::DnsServer;
@@ -29,6 +32,10 @@ pub struct AppState {
     /// 用标准库互斥锁而不是 tokio 的：退出事件处理器是同步上下文，
     /// 那里必须能不带 async 直接完成还原，否则进程退出后网卡仍指向 127.0.0.1。
     dns_snapshot: Arc<std::sync::Mutex<Option<DnsSnapshot>>>,
+    /// FLOW 层只读观察器（不参与转发）
+    flow_monitor: Arc<windivert::FlowMonitor>,
+    /// 最小重定向会话（单目标，实验性，默认不启动）
+    redirect_session: Arc<redirect_session::RedirectSession>,
 }
 
 /// 取共享配置的锁，中毒时沿用内部数据
@@ -96,6 +103,98 @@ fn release_dns_takeover(slot: &std::sync::Mutex<Option<DnsSnapshot>>) {
     if let Err(error) = sync_dns_takeover(slot, false) {
         tracing::error!(%error, "还原系统 DNS 失败，请手动检查网卡 DNS 设置");
     }
+}
+
+/// 可执行文件所在目录：WinDivert.dll 与 WinDivert64.sys 就放在这里
+fn executable_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+#[tauri::command]
+async fn start_flow_monitor(
+    state: State<'_, AppState>,
+) -> Result<windivert::FlowMonitorStatus, String> {
+    state.flow_monitor.start()
+}
+
+#[tauri::command]
+async fn stop_flow_monitor(
+    state: State<'_, AppState>,
+) -> Result<windivert::FlowMonitorStatus, String> {
+    Ok(state.flow_monitor.stop())
+}
+
+#[tauri::command]
+async fn get_flow_monitor_status(
+    state: State<'_, AppState>,
+) -> Result<windivert::FlowMonitorStatus, String> {
+    Ok(state.flow_monitor.status())
+}
+
+#[tauri::command]
+async fn get_active_flows(state: State<'_, AppState>) -> Result<Vec<windivert::FlowEntry>, String> {
+    Ok(state.flow_monitor.snapshot())
+}
+
+/// 启动重定向的请求
+///
+/// 刻意不写进配置文件：一个"已启用"的接管设置会在下次启动时自动拦截流量，
+/// 而这是实验性能力，默认值必须是"不碰任何流量"。
+#[derive(serde::Deserialize)]
+struct RedirectRequest {
+    target_addr: String,
+    target_port: u16,
+    /// 中继绑定的本机地址：必须能收到注入包，所以要填面向客户端的网卡地址
+    relay_bind: String,
+    relay_port: u16,
+    sentinel_port: u16,
+}
+
+#[tauri::command]
+async fn start_redirect(
+    state: State<'_, AppState>,
+    request: RedirectRequest,
+) -> Result<redirect_session::RedirectOverview, String> {
+    let target_addr: std::net::Ipv4Addr = request
+        .target_addr
+        .trim()
+        .parse()
+        .map_err(|_| format!("目标地址「{}」不是合法的 IPv4 地址", request.target_addr))?;
+    let relay_bind: std::net::Ipv4Addr = request
+        .relay_bind
+        .trim()
+        .parse()
+        .map_err(|_| format!("中继绑定地址「{}」不是合法的 IPv4 地址", request.relay_bind))?;
+    if request.target_port == 0 {
+        return Err("目标端口不能为 0".to_string());
+    }
+
+    let rule = windivert::RedirectRule {
+        target_addr,
+        target_port: request.target_port,
+        relay_port: request.relay_port,
+        sentinel_port: request.sentinel_port,
+    };
+    state.redirect_session.start(rule, relay_bind)?;
+    Ok(state.redirect_session.overview())
+}
+
+#[tauri::command]
+async fn stop_redirect(
+    state: State<'_, AppState>,
+) -> Result<redirect_session::RedirectOverview, String> {
+    state.redirect_session.stop();
+    Ok(state.redirect_session.overview())
+}
+
+#[tauri::command]
+async fn get_redirect_status(
+    state: State<'_, AppState>,
+) -> Result<redirect_session::RedirectOverview, String> {
+    Ok(state.redirect_session.overview())
 }
 
 #[tauri::command]
@@ -907,6 +1006,8 @@ pub fn run() {
         latency_results: latency_results.clone(),
         latency_last_test: latency_last_test.clone(),
         dns_snapshot: Arc::new(std::sync::Mutex::new(None)),
+        flow_monitor: Arc::new(windivert::FlowMonitor::new(executable_dir())),
+        redirect_session: Arc::new(redirect_session::RedirectSession::new(executable_dir())),
     };
 
     // 上次异常退出可能把网卡 DNS 留在 127.0.0.1，先自愈再启动服务
@@ -1186,7 +1287,14 @@ pub fn run() {
             download_and_install,
             get_memory_usage,
             is_autostart_enabled,
-            set_autostart
+            set_autostart,
+            start_flow_monitor,
+            stop_flow_monitor,
+            get_flow_monitor_status,
+            get_active_flows,
+            start_redirect,
+            stop_redirect,
+            get_redirect_status
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -1200,6 +1308,9 @@ pub fn run() {
             ) {
                 let state = app_handle.state::<AppState>();
                 release_dns_takeover(&state.dns_snapshot);
+                // 退出即回滚：句柄关闭时驱动本来就会把未超时的包重新注入，
+                // 这里显式停一次是为了让中继也立刻关闭，不留半开状态
+                state.redirect_session.stop();
             }
         });
 }

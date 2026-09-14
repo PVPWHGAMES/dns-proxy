@@ -1,3 +1,4 @@
+pub mod bootstrap;
 pub mod cache;
 pub mod ecs;
 pub mod handler;
