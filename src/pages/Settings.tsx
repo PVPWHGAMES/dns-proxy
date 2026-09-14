@@ -1,25 +1,50 @@
 import { useState, useEffect } from "react";
 import { Save, Plus, Trash2, Server, Wifi, Database, Zap, RefreshCw, Timer, Monitor } from "lucide-react";
-import { api, AppConfig, DnsServer, DnsProtocol, DnsStrategy, DnsLatencyResult, ServerGroup } from "../lib/api";
+import { api, AppConfig, DnsServer, DnsProtocol, DnsStrategy, DnsLatencyResult, ServerGroup, DnsTakeoverStatus } from "../lib/api";
 import MessageBanner from "../components/ui/MessageBanner";
 import Badge from "../components/ui/Badge";
 
 export default function Settings() {
   const [config, setConfig] = useState<AppConfig | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [initializing, setInitializing] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [latencyResults, setLatencyResults] = useState<DnsLatencyResult[]>([]);
   const [testingLatency, setTestingLatency] = useState(false);
   const [lastTestTime, setLastTestTime] = useState<string | null>(null);
   const [autostartEnabled, setAutostartEnabled] = useState(false);
+  const [takeover, setTakeover] = useState<DnsTakeoverStatus | null>(null);
+  const [restoring, setRestoring] = useState(false);
 
   // 加载配置
   useEffect(() => {
     loadConfig();
     loadLatencyResults();
     loadAutostartStatus();
+    loadTakeoverStatus();
   }, []);
+
+  const loadTakeoverStatus = async () => {
+    try {
+      setTakeover(await api.getDnsTakeoverStatus());
+    } catch (e) {
+      console.error("加载 DNS 接管状态失败:", e);
+    }
+  };
+
+  // 手动还原：接管状态下系统解析全靠本进程，需要一键退路
+  const handleRestoreSystemDns = async () => {
+    setRestoring(true);
+    try {
+      const result = await api.restoreSystemDns();
+      setMessage({ type: "success", text: result });
+      await loadTakeoverStatus();
+    } catch (e) {
+      setMessage({ type: "error", text: "还原系统 DNS 失败: " + e });
+    } finally {
+      setRestoring(false);
+    }
+  };
 
   const loadAutostartStatus = async () => {
     try {
@@ -42,7 +67,7 @@ export default function Settings() {
   };
 
   const loadConfig = async () => {
-    setLoading(true);
+    setInitializing(true);
     try {
       const cfg = await api.getConfig();
       setConfig(cfg);
@@ -50,7 +75,7 @@ export default function Settings() {
       console.error("加载配置失败:", e);
       setMessage({ type: "error", text: "加载配置失败: " + e });
     } finally {
-      setLoading(false);
+      setInitializing(false);
     }
   };
 
@@ -179,11 +204,26 @@ export default function Settings() {
     return "text-red-500";
   };
 
-  if (loading || !config) {
+  if (initializing) {
     return (
       <div className="flex items-center justify-center h-64">
         <RefreshCw className="w-8 h-8 animate-spin text-primary" />
         <span className="ml-2">加载配置中...</span>
+      </div>
+    );
+  }
+
+  if (!config) {
+    return (
+      <div className="flex flex-col items-center justify-center h-64 gap-3">
+        <p className="text-sm text-destructive">{message?.text || "配置暂时不可用"}</p>
+        <button
+          onClick={loadConfig}
+          className="flex items-center gap-2 px-3 py-2 text-sm border rounded-lg hover:bg-muted"
+        >
+          <RefreshCw className="w-4 h-4" />
+          重试
+        </button>
       </div>
     );
   }
@@ -214,6 +254,9 @@ export default function Settings() {
                 }
                 className="w-full px-3 py-2 border rounded-lg bg-background"
               />
+              <p className="text-xs text-muted-foreground mt-1">
+                默认 127.0.0.1 仅本机可用；填 0.0.0.0 会把本机变成局域网开放解析器
+              </p>
             </div>
             <div>
               <label className="block text-sm font-medium mb-2">监听端口</label>
@@ -229,6 +272,39 @@ export default function Settings() {
                 className="w-full px-3 py-2 border rounded-lg bg-background"
               />
             </div>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium mb-2">监听协议</label>
+            <div className="flex gap-2">
+              {[
+                { value: "both", label: "UDP + TCP", hint: "推荐：大响应与 DNSSEC 依赖 TCP" },
+                { value: "udp", label: "仅 UDP", hint: "响应被截断时客户端无法重试" },
+                { value: "tcp", label: "仅 TCP", hint: "排查 UDP 相关问题时使用" },
+              ].map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  title={option.hint}
+                  onClick={() =>
+                    setConfig({
+                      ...config,
+                      proxy: { ...config.proxy, protocol: option.value },
+                    })
+                  }
+                  className={`px-3 py-2 text-sm rounded-lg transition-colors ${
+                    config.proxy.protocol === option.value
+                      ? "bg-primary text-primary-foreground"
+                      : "border hover:bg-muted"
+                  }`}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+            <p className="text-xs text-muted-foreground mt-1">
+              只监听 UDP 时，超过客户端声明尺寸的响应会被置 TC 位，而客户端改走 TCP 重试会直接失败
+            </p>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -247,7 +323,7 @@ export default function Settings() {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium mb-2">缓存TTL (秒)</label>
+              <label className="block text-sm font-medium mb-2">缓存TTL上限 (秒)</label>
               <input
                 type="number"
                 value={config.proxy.cache_ttl}
@@ -259,6 +335,54 @@ export default function Settings() {
                 }
                 className="w-full px-3 py-2 border rounded-lg bg-background"
               />
+              <p className="text-xs text-muted-foreground mt-1">
+                实际缓存时间取记录自身 TTL 与此上限的较小值，命中时按驻留时间递减
+              </p>
+            </div>
+          </div>
+
+          {/* 系统 DNS 接管 */}
+          <div className="border rounded-lg p-3 space-y-3">
+            <label className="flex items-start gap-3 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={config.proxy.takeover_system_dns}
+                onChange={(e) =>
+                  setConfig({
+                    ...config,
+                    proxy: { ...config.proxy, takeover_system_dns: e.target.checked },
+                  })
+                }
+                className="w-4 h-4 mt-0.5"
+              />
+              <div>
+                <p className="text-sm font-medium">接管系统 DNS</p>
+                <p className="text-xs text-muted-foreground">
+                  启动服务时把在用网卡的 DNS 指向本机代理，停止服务或退出程序时按原配置精确还原
+                </p>
+              </div>
+            </label>
+
+            <div className="flex items-center justify-between gap-3 pl-7">
+              <div className="text-xs">
+                {takeover?.active ? (
+                  <span className="text-green-600 dark:text-green-400">
+                    ● 已接管
+                    {takeover.detail && (
+                      <span className="text-muted-foreground"> — 原配置：{takeover.detail}</span>
+                    )}
+                  </span>
+                ) : (
+                  <span className="text-muted-foreground">○ 未接管（系统仍用原有 DNS）</span>
+                )}
+              </div>
+              <button
+                onClick={handleRestoreSystemDns}
+                disabled={restoring || !takeover?.active}
+                className="shrink-0 px-3 py-1.5 text-xs border rounded-lg hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {restoring ? "还原中..." : "立即还原系统 DNS"}
+              </button>
             </div>
           </div>
 

@@ -1,6 +1,17 @@
-use crate::tun::TunConfig;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+/// 是否启用 GeoSite 域名路由
+///
+/// 当前阶段所有查询都走直连（默认分组的上游），域名路由规则不参与决策，因此停用。
+/// 停用带来三件事，都由本开关统一控制：
+/// - 不加载十几万条规则到内存，也不再把它们下载/写回配置
+/// - 命中 proxy 列表的域名不再被判为「代理请求」而跳过缓存与请求合并
+/// - 加载配置时顺带清理已停用的 geosite 订阅，避免配置文件被无用数据撑大
+///
+/// 前端 `src/pages/Rules.tsx` 的 `ROUTING_RULES_ENABLED` 必须与之保持一致。
+/// 恢复按域名分流时，把这两处一起改成 true。
+pub const GEOSITE_ROUTING_ENABLED: bool = false;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerGroup {
@@ -22,8 +33,6 @@ pub struct AppConfig {
     pub start_minimized: bool,
     #[serde(default = "default_server_groups")]
     pub server_groups: Vec<ServerGroup>,
-    #[serde(default)]
-    pub tun: TunConfig,
     #[serde(default)]
     pub ecs: EcsConfig,
 }
@@ -92,6 +101,13 @@ pub struct ProxyConfig {
     /// 默认分组：未匹配任何规则时使用，空字符串表示使用所有服务器
     #[serde(default = "default_default_group")]
     pub default_group: String,
+    /// 启动服务时把系统网卡的 DNS 指向本地代理，停止/退出时还原
+    #[serde(default = "default_takeover")]
+    pub takeover_system_dns: bool,
+}
+
+fn default_takeover() -> bool {
+    true
 }
 
 fn default_default_group() -> String {
@@ -199,13 +215,14 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             proxy: ProxyConfig {
-                listen_address: "0.0.0.0".to_string(),
+                listen_address: "127.0.0.1".to_string(),
                 listen_port: 53,
                 protocol: "both".to_string(),
                 cache_size: 1000,
                 cache_ttl: 300,
                 block_ipv6: false,
                 default_group: "domestic".to_string(),
+                takeover_system_dns: true,
             },
             upstream: vec![
                 DnsServer {
@@ -214,7 +231,16 @@ impl Default for AppConfig {
                     port: 53,
                     enabled: true,
                     protocol: DnsProtocol::Udp,
-                    doh_url: Some("https://dns.alidns.com/dns-query".to_string()),
+                    doh_url: None,
+                    group: "domestic".to_string(),
+                },
+                DnsServer {
+                    name: "DNSPod".to_string(),
+                    ip: "119.29.29.29".to_string(),
+                    port: 53,
+                    enabled: true,
+                    protocol: DnsProtocol::Udp,
+                    doh_url: None,
                     group: "domestic".to_string(),
                 },
                 DnsServer {
@@ -251,7 +277,6 @@ impl Default for AppConfig {
             },
             strategy: DnsStrategy::Fastest,
             start_minimized: false,
-            tun: TunConfig::default(),
             ecs: EcsConfig::default(),
         }
     }
@@ -272,17 +297,62 @@ impl AppConfig {
             let content = std::fs::read_to_string(&path).unwrap_or_default();
             toml::from_str(&content).unwrap_or_default()
         } else {
-            let mut config = Self::default();
-            config.tun.enabled = true;
-            config
+            Self::default()
         };
         config.migrate();
         config
     }
 
-    /// 迁移旧配置：合并 foreign 到 proxy，更新分组描述
+    /// 迁移旧配置：规范化后仅在确有改动时落盘
     fn migrate(&mut self) {
+        if self.normalize() {
+            self.save().ok();
+        }
+    }
+
+    /// 规范化历史配置，返回是否发生了改动
+    ///
+    /// 与落盘分离，便于在测试中直接验证规则而不触碰用户真实配置文件。
+    fn normalize(&mut self) -> bool {
         let mut changed = false;
+
+        // 0.0.0.0 会在所有网卡上监听，等于把本机变成局域网开放解析器。
+        // 这个程序只服务本机，历史配置一律收回回环地址。
+        if self.proxy.listen_address == "0.0.0.0" || self.proxy.listen_address == "::" {
+            self.proxy.listen_address = "127.0.0.1".to_string();
+            changed = true;
+        }
+
+        // 监听的传输协议写错时回退到 udp，避免配置拼写错误导致完全不监听
+        if !matches!(self.proxy.protocol.as_str(), "udp" | "tcp" | "both") {
+            self.proxy.protocol = "udp".to_string();
+            changed = true;
+        }
+
+        // 域名路由已停用时清掉对应的订阅及其缓存的规则
+        //
+        // 这些规则不参与任何计算，却会让配置文件膨胀到三十多万行，
+        // 每次保存都要整份重写。恢复分流时在规则页重新添加预设即可。
+        if !GEOSITE_ROUTING_ENABLED {
+            let before = self.subscriptions.len();
+            let removed_rules: usize = self
+                .subscriptions
+                .iter()
+                .filter(|sub| sub.sub_type == SubscriptionType::Geosite)
+                .map(|sub| sub.rules.len())
+                .sum();
+            self.subscriptions
+                .retain(|sub| sub.sub_type != SubscriptionType::Geosite);
+
+            if self.subscriptions.len() != before {
+                tracing::info!(
+                    removed_subscriptions = before - self.subscriptions.len(),
+                    removed_rules,
+                    "域名路由已停用，清理 geosite 订阅及其规则"
+                );
+                changed = true;
+            }
+        }
 
         // 将 upstream 中 group="foreign" 改为 "proxy"
         for server in &mut self.upstream {
@@ -342,9 +412,7 @@ impl AppConfig {
             changed = true;
         }
 
-        if changed {
-            self.save().ok();
-        }
+        changed
     }
 
     pub fn save(&self) -> anyhow::Result<()> {
@@ -352,5 +420,106 @@ impl AppConfig {
         let content = toml::to_string_pretty(self)?;
         std::fs::write(path, content)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_pins_wildcard_listen_address_back_to_loopback() {
+        for wildcard in ["0.0.0.0", "::"] {
+            let mut config = AppConfig::default();
+            config.proxy.listen_address = wildcard.to_string();
+
+            assert!(config.normalize());
+            assert_eq!(
+                config.proxy.listen_address, "127.0.0.1",
+                "全网卡监听必须收回回环，否则本机变成局域网开放解析器"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_keeps_explicitly_configured_listen_address() {
+        let mut config = AppConfig::default();
+        config.proxy.listen_address = "192.168.1.10".to_string();
+
+        // 用户显式指定的地址不属于规范化范围，仅在 wildcard 时改写
+        let before = config.proxy.listen_address.clone();
+        config.normalize();
+        assert_eq!(config.proxy.listen_address, before);
+    }
+
+    fn subscription(name: &str, sub_type: SubscriptionType) -> Subscription {
+        Subscription {
+            name: name.to_string(),
+            url: format!("https://example.invalid/{}", name),
+            enabled: true,
+            rules: vec![format!("{}.example.com", name)],
+            last_updated: None,
+            sub_type,
+            target_group: None,
+        }
+    }
+
+    /// 停用域名路由后，geosite 订阅连规则一起清掉，广告过滤订阅必须保留
+    #[test]
+    fn normalize_drops_geosite_subscriptions_when_routing_is_disabled() {
+        let mut config = AppConfig::default();
+        config.subscriptions = vec![
+            subscription("广告拦截域名", SubscriptionType::Blocklist),
+            subscription("CN 国内直连域名", SubscriptionType::Geosite),
+            subscription("Proxy 需代理域名", SubscriptionType::Geosite),
+        ];
+
+        assert!(config.normalize(), "清理订阅应被视为配置改动");
+
+        assert_eq!(
+            config.subscriptions.len(),
+            1,
+            "geosite 订阅应被清掉，黑名单订阅必须留下"
+        );
+        assert_eq!(config.subscriptions[0].name, "广告拦截域名");
+        assert_eq!(
+            config.subscriptions[0].sub_type,
+            SubscriptionType::Blocklist,
+            "广告过滤订阅的类型与规则都不应被改动"
+        );
+        assert_eq!(config.subscriptions[0].rules.len(), 1);
+    }
+
+    /// 没有 geosite 订阅时不应反复判定为「有改动」，否则每次启动都白写一次配置
+    #[test]
+    fn normalize_is_idempotent_once_geosite_is_gone() {
+        let mut config = AppConfig::default();
+        config.subscriptions = vec![subscription("广告拦截域名", SubscriptionType::Blocklist)];
+
+        // 第一次规范化可能因分组描述等历史项而改动，第二次必须稳定
+        config.normalize();
+        assert!(
+            !config.normalize(),
+            "已无 geosite 订阅时不应再判定为改动，避免每次启动都重写配置文件"
+        );
+    }
+
+    #[test]
+    fn normalize_falls_back_to_udp_for_unknown_transport() {
+        let mut config = AppConfig::default();
+        config.proxy.protocol = "bothh".to_string();
+
+        assert!(config.normalize());
+        assert_eq!(config.proxy.protocol, "udp");
+    }
+
+    #[test]
+    fn normalize_accepts_supported_transports() {
+        for protocol in ["udp", "tcp", "both"] {
+            let mut config = AppConfig::default();
+            config.proxy.protocol = protocol.to_string();
+            config.normalize();
+            assert_eq!(config.proxy.protocol, protocol);
+        }
     }
 }

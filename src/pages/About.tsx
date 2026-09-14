@@ -102,7 +102,7 @@ export default function About() {
           </div>
         </div>
         <h1 className="text-2xl font-bold mb-1">果冻网络加速</h1>
-        <p className="text-muted-foreground mb-3">版本 1.1.3</p>
+        <p className="text-muted-foreground mb-3">版本 1.2.0</p>
 
         {/* 检查更新按钮 */}
         <div className="mt-6">
@@ -275,7 +275,6 @@ export default function About() {
               { name: "Tauri", url: "https://tauri.app/" },
               { name: "trust-dns", url: "https://github.com/bluejekyll/trust-dns" },
               { name: "Loyalsoldier", url: "https://github.com/Loyalsoldier/v2ray-rules-dat" },
-              { name: "WinTun", url: "https://www.wintun.net/" },
               { name: "React", url: "https://react.dev/" },
               { name: "Tailwind CSS", url: "https://tailwindcss.com/" },
               { name: "Lucide Icons", url: "https://lucide.dev/" },

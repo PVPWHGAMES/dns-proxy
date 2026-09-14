@@ -28,6 +28,8 @@ export interface ProxyConfig {
   cache_ttl: number;
   block_ipv6: boolean;
   default_group: string;
+  /** 启动服务时把系统网卡 DNS 指向本代理，停止/退出时还原 */
+  takeover_system_dns: boolean;
 }
 
 export interface Rule {
@@ -76,24 +78,6 @@ export interface AppConfig {
   strategy: DnsStrategy;
   server_groups: ServerGroup[];
   ecs: EcsConfig;
-}
-
-export interface TunConfig {
-  enabled: boolean;
-  interface_name: string;
-  subnet: string;
-  gateway: string;
-  dns_servers: string[];
-  auto_route: boolean;
-}
-
-export interface TunStatus {
-  active: boolean;
-  starting: boolean;
-  interface_name: string;
-  ip_address: string;
-  dns_redirected: boolean;
-  packets_processed: number;
 }
 
 export interface DnsQueryLog {
@@ -168,6 +152,15 @@ export interface MemoryInfo {
   virtual_memory_mb: number;
 }
 
+export interface DnsTakeoverStatus {
+  /** 当前是否已接管系统 DNS */
+  active: boolean;
+  /** 接管前各网卡的原始配置摘要 */
+  detail: string;
+  /** 配置项：启动服务时是否自动接管 */
+  enabled: boolean;
+}
+
 export const api = {
   async getConfig(): Promise<AppConfig> {
     return await invoke("get_config");
@@ -193,8 +186,12 @@ export const api = {
     return await invoke("get_stats");
   },
 
-  async getLogs(): Promise<DnsQueryLog[]> {
-    return await invoke("get_logs");
+  async getLogs(limit?: number): Promise<DnsQueryLog[]> {
+    return await invoke("get_logs", { limit });
+  },
+
+  async getLogsSince(sinceId: number): Promise<DnsQueryLog[]> {
+    return await invoke("get_logs_since", { sinceId });
   },
 
   async clearLogs(): Promise<void> {
@@ -225,27 +222,6 @@ export const api = {
     return await invoke("update_subscriptions");
   },
 
-  // TUN 相关
-  async getTunConfig(): Promise<TunConfig> {
-    return await invoke("get_tun_config");
-  },
-
-  async saveTunConfig(config: TunConfig): Promise<void> {
-    return await invoke("save_tun_config", { newConfig: config });
-  },
-
-  async startTun(): Promise<string> {
-    return await invoke("start_tun");
-  },
-
-  async stopTun(): Promise<string> {
-    return await invoke("stop_tun");
-  },
-
-  async getTunStatus(): Promise<TunStatus> {
-    return await invoke("get_tun_status");
-  },
-
   async testDnsLatency(): Promise<DnsLatencyResult[]> {
     return await invoke("test_dns_latency");
   },
@@ -254,8 +230,13 @@ export const api = {
     return await invoke("get_latency_results");
   },
 
-  async downloadAndInstall(url: string, sha256: string): Promise<string> {
-    return await invoke("download_and_install", { url, sha256 });
+  // 系统 DNS 接管
+  async getDnsTakeoverStatus(): Promise<DnsTakeoverStatus> {
+    return await invoke("get_dns_takeover_status");
+  },
+
+  async restoreSystemDns(): Promise<string> {
+    return await invoke("restore_system_dns");
   },
 
   // 程序自启动（Windows 注册表）

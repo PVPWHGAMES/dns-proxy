@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { api, DnsQueryLog } from "../lib/api";
+import { dnsActionLabel, dnsActionVariant } from "../lib/dnsAction";
 import Badge from "../components/ui/Badge";
 import {
   Search,
@@ -13,6 +14,11 @@ import {
   FileText,
 } from "lucide-react";
 
+/** 首次进入页面加载的日志条数 */
+const INITIAL_LOG_COUNT = 500;
+/** 前端保留的日志上限，与后端保持一致 */
+const MAX_LOG_COUNT = 1000;
+
 export default function Logs() {
   const [logs, setLogs] = useState<DnsQueryLog[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
@@ -20,39 +26,74 @@ export default function Logs() {
   const [filterType, setFilterType] = useState<string>("all");
   const [isLive, setIsLive] = useState(true);
   const [loading, setLoading] = useState(false);
+  /** 已收到的最新日志 id，增量拉取以此为游标 */
+  const lastLogIdRef = useRef(0);
+  /** 防止慢请求下轮询重入 */
+  const fetchingRef = useRef(false);
+  /** 历史日志加载完成后才允许增量拉取，避免两者相互覆盖 */
+  const initializedRef = useRef(false);
 
-  // 刷新日志
-  const refreshLogs = useCallback(async () => {
+  // 首次加载：取最近若干条，并记录最新 id 作为增量游标
+  const loadRecentLogs = useCallback(async () => {
     try {
-      const newLogs = await api.getLogs();
-      setLogs(newLogs);
+      const recent = await api.getLogs(INITIAL_LOG_COUNT);
+      setLogs(recent);
+      if (recent.length > 0) {
+        lastLogIdRef.current = recent[0].id;
+      }
     } catch (e) {
       console.error("获取日志失败:", e);
+    } finally {
+      initializedRef.current = true;
     }
   }, []);
 
-  // 定时刷新
+  // 增量拉取：只取比已见 id 更新的记录，避免每次回传整份日志
+  const fetchNewLogs = useCallback(async () => {
+    if (!initializedRef.current || fetchingRef.current) return;
+    fetchingRef.current = true;
+    try {
+      const fresh = await api.getLogsSince(lastLogIdRef.current);
+      if (fresh.length > 0) {
+        lastLogIdRef.current = fresh[fresh.length - 1].id;
+        // 后端按旧到新返回，转为新到旧后拼在列表前面
+        setLogs((prev) => [...fresh].reverse().concat(prev).slice(0, MAX_LOG_COUNT));
+      }
+    } catch (e) {
+      console.error("获取增量日志失败:", e);
+    } finally {
+      fetchingRef.current = false;
+    }
+  }, []);
+
+  // 首次进入加载历史日志
+  useEffect(() => {
+    loadRecentLogs();
+  }, [loadRecentLogs]);
+
+  // DNS 日志增量刷新
   useEffect(() => {
     if (!isLive) return;
-    refreshLogs();
-    const interval = setInterval(refreshLogs, 2000);
+    fetchNewLogs();
+    const interval = setInterval(fetchNewLogs, 2000);
     return () => clearInterval(interval);
-  }, [isLive, refreshLogs]);
+  }, [isLive, fetchNewLogs]);
 
-  // 筛选日志
+  // 筛选 DNS 日志（域名命中）
   const filteredLogs = logs.filter((log) => {
-    const matchesSearch = log.domain.toLowerCase().includes(searchQuery.toLowerCase());
+    const keyword = searchQuery.toLowerCase();
+    const matchesSearch = log.domain.toLowerCase().includes(keyword);
     const matchesAction = filterAction === "all" || log.action === filterAction;
     const matchesType = filterType === "all" || log.query_type === filterType;
     return matchesSearch && matchesAction && matchesType;
   });
 
-  // 清空日志
+  // 清空日志（日志 id 持续递增，游标保持不变即可继续增量拉取）
   const handleClearLogs = async () => {
     setLoading(true);
     try {
       await api.clearLogs();
-      await refreshLogs();
+      setLogs([]);
     } catch (e) {
       console.error("清空日志失败:", e);
     } finally {
@@ -60,24 +101,21 @@ export default function Logs() {
     }
   };
 
-  // 导出日志
-  const handleExportLogs = () => {
-    const csv = [
-      ["时间", "域名", "类型", "响应", "上游", "分组", "延迟", "状态"].join(","),
-      ...filteredLogs.map((log) =>
-        [
-          log.timestamp,
-          log.domain,
-          log.query_type,
-          log.response,
-          log.upstream,
-          log.group || "-",
-          `${log.latency_ms}ms`,
-          log.action === "success" ? "成功" : log.action === "blocked" ? "阻止" : "缓存",
-        ].join(",")
-      ),
-    ].join("\n");
+  // 导出当前筛选结果
+  const handleExport = () => {
+    const header = ["时间", "域名", "类型", "响应", "上游", "分组", "延迟", "状态"];
+    const rows = filteredLogs.map((log) => [
+      log.timestamp,
+      log.domain,
+      log.query_type,
+      log.response,
+      log.upstream,
+      log.group || "-",
+      `${log.latency_ms}ms`,
+      dnsActionLabel(log.action),
+    ]);
 
+    const csv = [header.join(","), ...rows.map((row) => row.join(","))].join("\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -87,7 +125,7 @@ export default function Logs() {
     URL.revokeObjectURL(url);
   };
 
-  // 计算统计
+  // DNS 日志统计
   const totalLogs = logs.length;
   const avgLatency = logs.length > 0
     ? Math.round(logs.reduce((acc, log) => acc + log.latency_ms, 0) / logs.length)
@@ -99,7 +137,7 @@ export default function Logs() {
   return (
     <div className="space-y-6">
       {/* 工具栏 */}
-      <div className="bg-card rounded-xl border p-4">
+      <div className="bg-card rounded-xl border p-4 space-y-4">
         <div className="flex flex-col md:flex-row gap-4 items-center justify-between">
           <div className="relative flex-1 w-full">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
@@ -123,6 +161,7 @@ export default function Logs() {
               <option value="success">成功</option>
               <option value="blocked">阻止</option>
               <option value="cached">缓存</option>
+              <option value="failed">失败</option>
             </select>
             <select
               value={filterType}
@@ -158,7 +197,7 @@ export default function Logs() {
               )}
             </button>
             <button
-              onClick={handleExportLogs}
+              onClick={handleExport}
               className="flex items-center gap-2 px-3 py-2 text-sm border rounded-lg hover:bg-muted"
             >
               <Download className="w-4 h-4" />
@@ -189,16 +228,16 @@ export default function Logs() {
         </div>
 
         <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
-          <table className="w-full table-fixed min-w-[850px]">
+          <table className="w-full table-fixed min-w-[1000px]">
             <thead className="sticky top-0 bg-card z-10">
               <tr className="border-b bg-muted/50">
-                <th className="text-left p-3 text-sm font-medium text-muted-foreground w-[13%]">
+                <th className="text-left p-3 text-sm font-medium text-muted-foreground w-[11%]">
                   <div className="flex items-center gap-2">
                     <Clock className="w-4 h-4" />
                     时间
                   </div>
                 </th>
-                <th className="text-left p-3 text-sm font-medium text-muted-foreground w-[27%]">
+                <th className="text-left p-3 text-sm font-medium text-muted-foreground w-[26%]">
                   <div className="flex items-center gap-2">
                     <Globe className="w-4 h-4" />
                     域名
@@ -207,16 +246,16 @@ export default function Logs() {
                 <th className="text-left p-3 text-sm font-medium text-muted-foreground w-[8%]">
                   类型
                 </th>
-                <th className="text-left p-3 text-sm font-medium text-muted-foreground w-[17%]">
+                <th className="text-left p-3 text-sm font-medium text-muted-foreground w-[18%]">
                   响应
                 </th>
-                <th className="text-left p-3 text-sm font-medium text-muted-foreground w-[13%]">
+                <th className="text-left p-3 text-sm font-medium text-muted-foreground w-[14%]">
                   <div className="flex items-center gap-2">
                     <Server className="w-4 h-4" />
                     上游
                   </div>
                 </th>
-                <th className="text-left p-3 text-sm font-medium text-muted-foreground w-[7%]">
+                <th className="text-left p-3 text-sm font-medium text-muted-foreground w-[8%]">
                   分组
                 </th>
                 <th className="text-left p-3 text-sm font-medium text-muted-foreground w-[7%]">
@@ -271,8 +310,8 @@ export default function Logs() {
                       </span>
                     </td>
                     <td className="p-3 text-sm whitespace-nowrap">
-                      <Badge variant={log.action === "success" ? "success" : log.action === "blocked" ? "danger" : "info"}>
-                        {log.action === "success" ? "成功" : log.action === "blocked" ? "阻止" : "缓存"}
+                      <Badge variant={dnsActionVariant(log.action)}>
+                        {dnsActionLabel(log.action)}
                       </Badge>
                     </td>
                   </tr>

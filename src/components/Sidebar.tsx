@@ -4,7 +4,6 @@ import {
   Settings,
   ListFilter,
   FileText,
-  Wifi,
   Info,
 } from "lucide-react";
 
@@ -18,11 +17,6 @@ const navItems = [
     title: "DNS 设置",
     icon: Settings,
     path: "/settings",
-  },
-  {
-    title: "网络设置",
-    icon: Wifi,
-    path: "/network",
   },
   {
     title: "规则管理",
@@ -54,7 +48,7 @@ export default function Sidebar() {
           </div>
           <div>
             <h1 className="font-bold text-lg">果冻网络加速</h1>
-            <p className="text-xs text-muted-foreground">v1.1.3</p>
+            <p className="text-xs text-muted-foreground">v1.2.0</p>
           </div>
         </div>
       </div>

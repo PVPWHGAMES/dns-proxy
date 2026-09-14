@@ -152,7 +152,7 @@ npm run lint
 - 生成命令：`npx tauri build`（`tauri.conf.json` 的 `bundle.targets` 已固定为 `["nsis"]`）
 - 产物路径：`src-tauri/target/release/bundle/nsis/DNS Proxy_<版本>_x64-setup.exe`
 - **安装到 Program Files**：`tauri.conf.json` 的 `bundle.windows.nsis.installMode` 设为 `"perMachine"`（安装目录默认 `C:\Program Files\DNS Proxy`，需要管理员安装）
-- **双击运行弹 UAC 提权**：`build.rs` 通过 `tauri_build::WindowsAttributes::app_manifest(include_str!("app-manifest.xml"))` 设置 `requestedExecutionLevel="requireAdministrator"`。因为 TUN 模式要改系统 DNS、创建虚拟网卡，必须管理员权限，双击运行即弹 UAC 兜底，无需手动右键管理员运行
+- **双击运行弹 UAC 提权**：`build.rs` 通过 `tauri_build::WindowsAttributes::app_manifest(include_str!("app-manifest.xml"))` 设置 `requestedExecutionLevel="requireAdministrator"`。监听本地 53 端口需要管理员权限，双击运行即弹 UAC 兜底，无需手动右键管理员运行
 - **自启动用计划任务（不是注册表 Run 键）**：`requireAdministrator` 下，写 `HKCU\...\Run` 键的程序在登录时会被 Windows 静默跳过（无法静默提权）。所以 `lib.rs` 的 `is_autostart_enabled`/`set_autostart` 改用 `schtasks` 计划任务：`/SC ONLOGON /RL HIGHEST`，登录时以最高权限静默启动，不弹 UAC。任务名固定 `DNS Proxy`
 
 ### 源码更新
@@ -173,11 +173,11 @@ npm run lint
 - Node.js >= 18
 - Rust >= 1.70
 - Visual Studio Build Tools (Windows)
-- 管理员权限（修改系统DNS）
+- 管理员权限（监听本地53端口）
 
 ## 注意事项
 
-1. **权限**: 修改系统DNS需要管理员权限
+1. **权限**: 监听本地53端口需要管理员权限
 2. **端口53**: 可能被其他服务占用，需要检测
 3. **防火墙**: 需要添加防火墙规则
 4. **DNS泄露**: 确保所有请求都经过代理

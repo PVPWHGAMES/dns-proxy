@@ -4,7 +4,7 @@
 
 ## ✨ 特性
 
-- 🌐 **全局 DNS 接管** - 通过 TUN 虚拟网卡或系统 DNS 设置一键接管
+- 🌐 **全局 DNS 接管** - 通过系统 DNS 设置一键把本机解析指向本地代理
 - 🔀 **国内外域名分流** - DNS 服务器分组，国内域名走国内 DNS，国外域名走代理
 - 🗺️ **GeoSite 域名路由** - 内置预设订阅（11 万+ 国内域名、2.7 万+ 代理域名）
 - 🚫 **广告拦截** - 黑名单订阅系统，支持 hosts / AdGuard / 纯域名格式
@@ -20,7 +20,6 @@
 |------|------|
 | 仪表盘 | 服务启停、统计卡片、最近查询（含分组标记）、上游服务器状态 |
 | DNS 设置 | 监听配置、缓存、DNS 策略（顺序/最快/负载均衡/并行）、上游服务器管理、延迟测试 |
-| 网络设置 | TUN 虚拟网卡配置、自动路由、系统 DNS 重定向 |
 | 规则管理 | 黑名单订阅、域名路由规则（GeoSite）、自定义规则（精确/通配符/正则） |
 | 日志查看 | 实时日志流、搜索过滤、分组标记、导出 CSV |
 
@@ -32,7 +31,6 @@
 | 后端 | Rust + Tokio + trust-dns |
 | 框架 | Tauri v2 |
 | 构建 | Vite + Cargo |
-| TUN | WinTun |
 
 ## 📦 安装
 
@@ -44,7 +42,7 @@
 - `DNS-Proxy-1.0.2-Setup.exe` - NSIS 安装包
 - `dns-proxy.exe` - 独立可执行文件
 
-> ⚠️ TUN 模式需要**管理员权限**运行
+> ⚠️ 监听本地 53 端口需要**管理员权限**运行
 
 ### 从源码构建
 
@@ -63,10 +61,10 @@ npm run tauri build  # 生产构建
 
 ## 🚀 快速开始
 
-1. 启动程序（TUN 模式需管理员权限）
+1. 启动程序（需管理员权限）
 2. 在**设置页面**配置上游 DNS 服务器（可一键添加国内/代理预设）
 3. 在**规则页面**添加 GeoSite 域名路由（国内域名 → domestic，国外域名 → proxy）
-4. 点击「启动服务」，系统 DNS 自动切换到本地代理
+4. 点击「启动服务」，再把系统网卡的 DNS 指向本机 `127.0.0.1`
 
 ## 📖 使用说明
 
@@ -117,7 +115,7 @@ npm run tauri build  # 生产构建
 
 1. ClashVerge 开启 TUN 模式，DNS 监听在 `127.0.0.1:1053`
 2. dns-proxy 的 `proxy` 分组配置 Clash DNS (`127.0.0.1:1053`)
-3. 国外域名解析返回 Clash fake-ip，由 Clash TUN 拦截并走代理
+3. 国外域名解析返回 Clash fake-ip，由 Clash 接管并走代理
 
 ## 📁 项目结构
 
@@ -131,18 +129,16 @@ dns-proxy/
 │   │   ├── dns/
 │   │   │   ├── server.rs   # DNS 服务器（UDP 监听）
 │   │   │   ├── handler.rs  # 查询处理（规则、分组转发、缓存）
+│   │   │   ├── pool.rs     # 上游连接池（UDP socket 复用 + DoT 长连接）
 │   │   │   └── cache.rs    # DNS 缓存（TTL + LRU）
-│   │   └── tun/
-│   │       ├── device.rs   # WinTun 虚拟网卡
-│   │       └── dns_intercept.rs  # TUN DNS 拦截
 │   └── Cargo.toml
 ├── src/                    # React 前端
 │   ├── pages/
 │   │   ├── Dashboard.tsx   # 仪表盘
 │   │   ├── Settings.tsx    # DNS 设置
-│   │   ├── NetworkSettings.tsx  # TUN 配置
 │   │   ├── Rules.tsx       # 规则管理
-│   │   └── Logs.tsx        # 日志查看
+│   │   ├── Logs.tsx        # 日志查看
+│   │   └── About.tsx       # 关于
 │   ├── components/         # UI 组件
 │   └── lib/api.ts          # Tauri IPC 接口
 ├── docs/architecture.md    # 架构设计
@@ -167,4 +163,3 @@ MIT License
 - [Tauri](https://tauri.app/) - 桌面应用框架
 - [trust-dns](https://github.com/bluejekyll/trust-dns) - DNS 库
 - [Loyalsoldier/v2ray-rules-dat](https://github.com/Loyalsoldier/v2ray-rules-dat) - GeoSite 域名列表
-- [WinTun](https://www.wintun.net/) - TUN 驱动

@@ -1,19 +1,108 @@
 use crate::config::{
     AppConfig, DnsProtocol, DnsStrategy, RuleAction, RuleType, Subscription, SubscriptionType,
 };
-use crate::dns::cache::DnsCache;
+use crate::dns::cache::{effective_cache_ttl, DnsCache};
 use crate::dns::ecs;
 use crate::dns::pool::DnsConnectionPool;
 use crate::dns::DnsQueryLog;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex as AsyncMutex;
 use tracing::{debug, info, warn};
 use trust_dns_client::op::Message;
 use trust_dns_client::rr::{RData, Record, RecordType};
+use trust_dns_proto::op::{Edns, MessageType, ResponseCode};
 use trust_dns_proto::serialize::binary::{BinDecodable, BinEncodable};
+
+/// 是否启用 GeoSite 域名路由
+///
+/// 开关定义在 `config` 里（它是产品级决定，同时要驱动配置清理），这里只做转发引用。
+/// 停用不只是省内存：命中 proxy 列表的域名会被判为「代理请求」，从而**跳过缓存与
+/// 请求合并**、每次都问上游；上游分组为空时又回退到默认策略，等于白白浪费了缓存。
+const GEOSITE_ROUTING_ENABLED: bool = crate::config::GEOSITE_ROUTING_ENABLED;
+
+/// 查询日志保留上限，超出后丢弃最旧记录
+const MAX_LOG_ENTRIES: usize = 1000;
+
+/// 发往上游的查询统一声明的 EDNS0 载荷尺寸
+///
+/// 客户端在 UDP 上声明的尺寸只约束「客户端 ↔ 本代理」这一段，不应传导到上游。
+/// 若原样转发，上游会按 512 截断并返回 TC=1；客户端随后按规范改用 TCP 重试时，
+/// 本代理又以同样尺寸问上游，于是在 TCP 上再次拿到 TC=1 —— 而 TCP 的 TC 是终态，
+/// 客户端没有更高一级可升级，该域名就彻底解析不了。
+const UPSTREAM_EDNS_PAYLOAD: u16 = 4096;
+
+/// 把回包规范化成「这次查询的应答」
+///
+/// 两件事必须在这里统一兜住：
+/// 1. 事务 ID 必须是本次查询的 ID。缓存命中与请求合并返回的都是别的查询产生的
+///    响应字节，直接下发会被客户端判为非法报文（Windows 解析器报 Bad DNS packet
+///    并丢弃），表现为「首次能解析、之后整个缓存 TTL 内都失败」。
+/// 2. 客户端没声明 EDNS0 时不得回带 OPT 记录（RFC 6891 §7），而本代理为了向
+///    上游取全量答案会主动加上 OPT，因此需要按客户端情况摘掉。
+fn normalize_response_for_client(query_bytes: &[u8], response: Vec<u8>) -> Vec<u8> {
+    let Some(query_id) = query_bytes
+        .get(0..2)
+        .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
+    else {
+        return response;
+    };
+
+    let query = Message::from_bytes(query_bytes);
+    let client_had_edns = query
+        .as_ref()
+        .map(|message| message.extensions().is_some())
+        .unwrap_or(true);
+
+    let id_matches = response
+        .get(0..2)
+        .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]) == query_id)
+        .unwrap_or(true);
+
+    // 常见路径：EDNS0 客户端且 ID 已一致，无需重新编码上游原包
+    if id_matches && client_had_edns {
+        return response;
+    }
+
+    let Ok(mut message) = Message::from_bytes(&response) else {
+        return response;
+    };
+
+    message.set_id(query_id);
+    if !client_had_edns {
+        *message.extensions_mut() = None;
+    }
+
+    message.to_bytes().unwrap_or(response)
+}
+
+/// 让发往上游的查询声明足够大的 EDNS0 载荷尺寸
+///
+/// 客户端已声明不小于该值时不重新编码，直接原样转发。
+fn prepare_upstream_query(query_bytes: &[u8]) -> Vec<u8> {
+    let Ok(mut message) = Message::from_bytes(query_bytes) else {
+        return query_bytes.to_vec();
+    };
+
+    if message.extensions().is_some() {
+        let Some(edns) = message.extensions_mut() else {
+            return query_bytes.to_vec();
+        };
+        if edns.max_payload() >= UPSTREAM_EDNS_PAYLOAD {
+            return query_bytes.to_vec();
+        }
+        // 只改尺寸，DO 位与已有 EDNS 选项（例如 ECS）保持不变
+        edns.set_max_payload(UPSTREAM_EDNS_PAYLOAD);
+    } else {
+        let mut edns = Edns::new();
+        edns.set_max_payload(UPSTREAM_EDNS_PAYLOAD);
+        message.set_edns(edns);
+    }
+
+    message.to_bytes().unwrap_or_else(|_| query_bytes.to_vec())
+}
 
 pub struct DnsHandler {
     config: Arc<Mutex<AppConfig>>,
@@ -33,6 +122,8 @@ pub struct DnsHandler {
     pool: Arc<DnsConnectionPool>,
     /// 请求合并：等待中的查询 (cache_key -> 追随者列表)
     pending_queries: Arc<AsyncMutex<HashMap<String, PendingQueryState>>>,
+    /// 已告警过的问题标识，避免每次查询重复刷同一条告警
+    warned_messages: Arc<Mutex<HashSet<String>>>,
 }
 
 /// 请求合并的进行中查询状态
@@ -92,11 +183,18 @@ pub struct TrafficStats {
     pub queries_per_second: f64,
 }
 
+/// 时间线保留的分钟数
+pub const TIMELINE_MINUTES: i64 = 60;
+
 /// 时间序列数据收集器
 #[derive(Default)]
 pub struct TrafficStatsCollector {
-    // 按分钟统计的时间线 (格式: "HH:MM" -> (total, blocked, cached))
-    pub minute_buckets: BTreeMap<String, (u64, u64, u64)>,
+    /// 按「当天第几分钟」统计的时间线 -> (total, blocked, cached)
+    ///
+    /// 用分钟序号而不是 "HH:MM" 字符串：字符串只能做字典序比较，
+    /// 跨零点时 "00:05" < "23:30" 会把当天刚产生的桶全部当成过期数据删掉，
+    /// 导致 0 点到 1 点之间趋势图恒为空。
+    pub minute_buckets: BTreeMap<u32, (u64, u64, u64)>,
     // 域名计数
     pub domain_counts: HashMap<String, u64>,
     // 延迟分布
@@ -106,16 +204,74 @@ pub struct TrafficStatsCollector {
 }
 
 impl DnsHandler {
-    pub fn new(config: AppConfig, cache: Arc<DnsCache>) -> Self {
-        let http_client = reqwest::Client::builder()
+    /// 构造处理器
+    ///
+    /// `config` 是**共享**的配置实例，与服务器和界面状态同一份，构造期不再克隆。
+    /// 过去这里写的是 `Arc::new(Mutex::new(config.clone()))`：既把按值传入的参数
+    /// 白克隆一次，又让同一份配置在内存里存在多份，而订阅规则动辄十几万条。
+    pub fn new(config: Arc<Mutex<AppConfig>>, cache: Arc<DnsCache>) -> Self {
+        let mut http_client_builder = reqwest::Client::builder()
             .timeout(Duration::from_secs(3))
             .pool_max_idle_per_host(8)
-            .pool_idle_timeout(Duration::from_secs(90))
-            .build()
-            .unwrap_or_default();
+            .pool_idle_timeout(Duration::from_secs(90));
+
+        // 在系统 DNS 切换到本地代理前固定 DoH 上游地址，避免解析 DoH 主机名时递归回自身。
+        // 借用一段短锁读出上游列表，读完立刻释放，不把锁带进后面的 await。
+        let upstream = {
+            let guard = config
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard.upstream.clone()
+        };
+
+        for server in upstream
+            .iter()
+            .filter(|server| server.enabled && server.protocol == DnsProtocol::Doh)
+        {
+            let Some(doh_url) = server.doh_url.as_deref() else {
+                continue;
+            };
+            let Ok(url) = reqwest::Url::parse(doh_url) else {
+                warn!("DoH URL 无效，无法预解析: {}", doh_url);
+                continue;
+            };
+            let Some(host) = url.host_str() else {
+                warn!("DoH URL 缺少主机名，无法预解析: {}", doh_url);
+                continue;
+            };
+            if host.parse::<IpAddr>().is_ok() {
+                continue;
+            }
+
+            let port = url.port_or_known_default().unwrap_or(443);
+            let bootstrap_addr = server
+                .ip
+                .parse::<IpAddr>()
+                .ok()
+                .map(|ip| SocketAddr::new(ip, port))
+                .or_else(|| {
+                    (host, port)
+                        .to_socket_addrs()
+                        .ok()
+                        .and_then(|mut addresses| addresses.next())
+                });
+
+            if let Some(addr) = bootstrap_addr {
+                http_client_builder = http_client_builder.resolve(host, addr);
+                info!("DoH bootstrap 地址已固定: {} -> {}", host, addr);
+            } else {
+                warn!(
+                    "无法解析 DoH bootstrap 地址，可能触发本地 DNS 递归: {}",
+                    doh_url
+                );
+            }
+        }
+
+        let http_client = http_client_builder.build().unwrap_or_default();
 
         let blocklist = Arc::new(Mutex::new(HashSet::new()));
         let geosite_map = Arc::new(Mutex::new(HashMap::new()));
+
         let server_latency = Arc::new(Mutex::new(HashMap::new()));
         let public_ip = Arc::new(Mutex::new(None));
         let public_ip_last_update = Arc::new(Mutex::new(None));
@@ -132,7 +288,7 @@ impl DnsHandler {
 
         // 加载已有的订阅规则
         let handler = Self {
-            config: Arc::new(Mutex::new(config.clone())),
+            config,
             cache,
             logs: Arc::new(Mutex::new(Vec::new())),
             stats: Arc::new(Mutex::new(QueryStats::default())),
@@ -147,11 +303,19 @@ impl DnsHandler {
             traffic_stats: Arc::new(Mutex::new(traffic_collector)),
             pool,
             pending_queries: Arc::new(AsyncMutex::new(HashMap::new())),
+            warned_messages: Arc::new(Mutex::new(HashSet::new())),
         };
 
-        // 初始化黑名单和域名路由
-        handler.init_blocklist(&config.subscriptions);
-        handler.init_geosite(&config.subscriptions);
+        // 初始化黑名单和域名路由：直接借用已持有的共享配置，不再克隆订阅规则
+        {
+            let guard = handler
+                .config
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            handler.init_blocklist(&guard.subscriptions);
+            handler.init_geosite(&guard.subscriptions);
+        }
+
         handler
     }
 
@@ -171,7 +335,14 @@ impl DnsHandler {
     // 初始化域名路由表
     fn init_geosite(&self, subscriptions: &[Subscription]) {
         let mut map = self.geosite_map.lock().unwrap();
+        // 先清空：停用期间不能让上一次运行残留的规则继续影响判断
         map.clear();
+
+        if !GEOSITE_ROUTING_ENABLED {
+            info!("域名路由规则已停用，全部走直连");
+            return;
+        }
+
         for sub in subscriptions {
             if sub.enabled && sub.sub_type == SubscriptionType::Geosite {
                 if let Some(ref group) = sub.target_group {
@@ -224,6 +395,9 @@ impl DnsHandler {
                 .subscriptions
                 .iter()
                 .filter(|s| s.enabled)
+                // 路由停用时不再下载 geosite 列表：十几万条规则既不参与匹配，
+                // 每次拉取还要重写整份配置，纯属浪费
+                .filter(|s| GEOSITE_ROUTING_ENABLED || s.sub_type != SubscriptionType::Geosite)
                 .map(|s| (s.name.clone(), s.url.clone()))
                 .collect()
         };
@@ -316,7 +490,16 @@ impl DnsHandler {
         Ok(rules)
     }
 
-    pub async fn handle_query(&self, query_bytes: &[u8], _src_addr: SocketAddr) -> Option<Vec<u8>> {
+    /// 处理一条 DNS 查询
+    ///
+    /// 所有回包（缓存命中、请求合并、上游转发、本地拦截）都经过
+    /// `normalize_response_for_client`，保证事务 ID 与 EDNS0 形态对得上客户端。
+    pub async fn handle_query(&self, query_bytes: &[u8]) -> Option<Vec<u8>> {
+        let response = self.handle_query_inner(query_bytes).await?;
+        Some(normalize_response_for_client(query_bytes, response))
+    }
+
+    async fn handle_query_inner(&self, query_bytes: &[u8]) -> Option<Vec<u8>> {
         let start = Instant::now();
 
         let query = match Message::from_bytes(query_bytes) {
@@ -344,7 +527,8 @@ impl DnsHandler {
             let config = self.config.lock().unwrap();
             if config.proxy.block_ipv6 && query_type == RecordType::AAAA {
                 self.record_blocked(&query_name, "AAAA", "-", start);
-                return Some(self.create_blocked_response(&query, &config.proxy.listen_address));
+                // 回 NODATA 而非黑洞地址：客户端看到「没有 AAAA 记录」会立刻改用 IPv4
+                return Some(self.create_nodata_response(&query));
             }
         }
 
@@ -360,9 +544,8 @@ impl DnsHandler {
                 None
             }
             Some((RuleAction::Block, _, _)) | Some((RuleAction::BlockNull, _, _)) => {
-                let config = self.config.lock().unwrap();
                 self.record_blocked(&query_name, &format!("{:?}", query_type), "rule", start);
-                return Some(self.create_blocked_response(&query, &config.proxy.listen_address));
+                return Some(self.create_blocked_response(&query));
             }
             Some((RuleAction::BlockNxdomain, _, _)) => {
                 self.record_blocked(
@@ -379,14 +562,13 @@ impl DnsHandler {
 
         // ② 黑名单订阅（自定义规则未命中或为白名单时跳过）
         if !is_whitelisted && forward_group.is_none() && self.is_blocked(&query_name) {
-            let config = self.config.lock().unwrap();
             self.record_blocked(
                 &query_name,
                 &format!("{:?}", query_type),
                 "blocklist",
                 start,
             );
-            return Some(self.create_blocked_response(&query, &config.proxy.listen_address));
+            return Some(self.create_blocked_response(&query));
         }
 
         // 自定义规则未指定分组时，检查 geosite 域名路由
@@ -408,7 +590,16 @@ impl DnsHandler {
         // 代理请求交给代理软件每次重新解析，不读取缓存
         if !is_proxy_request {
             if let Some(cached) = self.cache.get(&cache_key) {
-                self.record_cached(&query_name, &format!("{:?}", query_type), start);
+                // 缓存命中也要记录真实目标 IP，便于日志直接看出访问去向
+                let cached_ip = cached
+                    .answers()
+                    .first()
+                    .and_then(|a| {
+                        a.data()
+                            .and_then(|d| d.to_string().split_whitespace().last().map(String::from))
+                    })
+                    .unwrap_or_else(|| "cached".to_string());
+                self.record_cached(&query_name, &format!("{:?}", query_type), &cached_ip, start);
                 return cached.to_bytes().ok();
             }
         }
@@ -472,8 +663,15 @@ impl DnsHandler {
             // 代理请求不写入缓存，避免污染直连结果
             if !is_proxy_request {
                 if let Ok(response_msg) = Message::from_bytes(response_bytes) {
-                    let ttl = Duration::from_secs(self.config.lock().unwrap().proxy.cache_ttl);
-                    self.cache.put(cache_key.clone(), response_msg, ttl);
+                    // 缓存寿命取记录自身 TTL，配置项只当上限；TTL 为 0 的响应不缓存
+                    let cap = Duration::from_secs(self.config.lock().unwrap().proxy.cache_ttl);
+                    match effective_cache_ttl(&response_msg, cap) {
+                        Some(lifetime) => {
+                            self.cache
+                                .put(cache_key.clone(), response_msg, lifetime, cap)
+                        }
+                        None => debug!("响应无可缓存记录或 TTL 为 0，跳过缓存: {}", query_name),
+                    }
                 }
             }
 
@@ -490,6 +688,13 @@ impl DnsHandler {
         // 通知所有等待中的追随者
         if !is_proxy_request {
             self.notify_pending(&cache_key, response.clone()).await;
+        }
+
+        // 上游 DNS 全部失败时记录失败日志并返回 SERVFAIL 响应，
+        // 避免上游不可用时让客户端一直等到超时。
+        if response.is_none() && !is_proxy_request {
+            self.record_failure(&query_name, &format!("{:?}", query_type), "none", start);
+            return Some(self.create_servfail_response(&query));
         }
 
         response
@@ -518,6 +723,11 @@ impl DnsHandler {
 
     // 检查域名是否匹配 geosite 路由表，返回目标分组
     fn check_geosite(&self, domain: &str) -> Option<String> {
+        // 停用期间表恒为空，这里显式短路，语义比依赖「表恰好是空的」更清楚
+        if !GEOSITE_ROUTING_ENABLED {
+            return None;
+        }
+
         let map = self.geosite_map.lock().unwrap();
 
         // 精确匹配
@@ -553,7 +763,14 @@ impl DnsHandler {
                 RuleType::Regex => regex::Regex::new(&rule.pattern)
                     .map(|re| re.is_match(domain))
                     .unwrap_or(false),
-                RuleType::Blocklist => false, // 黑名单通过is_blocked检查
+                // 黑名单类型规则自身就描述一个要拦的域名（含其子域名）。
+                // 订阅里的黑名单走 is_blocked 查表，这条用于用户手写的单条规则。
+                RuleType::Blocklist => {
+                    let pattern = rule.pattern.to_lowercase();
+                    let pattern = pattern.trim_end_matches('.');
+                    !pattern.is_empty()
+                        && (domain == pattern || domain.ends_with(&format!(".{}", pattern)))
+                }
             };
 
             if matched {
@@ -582,7 +799,10 @@ impl DnsHandler {
         };
 
         if group_servers.is_empty() {
-            warn!("分组 '{}' 没有启用的DNS服务器，回退到默认策略", group);
+            self.warn_once(
+                &format!("group_without_server:{}", group),
+                &format!("分组 '{}' 没有启用的DNS服务器，回退到默认策略", group),
+            );
             return self.forward_with_strategy(query_bytes).await;
         }
 
@@ -604,7 +824,7 @@ impl DnsHandler {
         };
 
         if enabled_servers.is_empty() {
-            warn!("没有启用的DNS服务器");
+            self.warn_once("no_enabled_server", "没有启用的DNS服务器");
             return (None, "none".to_string());
         }
 
@@ -770,10 +990,12 @@ impl DnsHandler {
     ) -> Option<Vec<u8>> {
         // 获取 ECS 配置并注入 ECS 信息
         let query_with_ecs = self.maybe_inject_ecs(query_bytes).await;
+        // 再统一把上游查询的 EDNS0 尺寸抬到足够大，避免上游按客户端的小尺寸截断
+        let upstream_query = prepare_upstream_query(&query_with_ecs);
 
         match server.protocol {
             DnsProtocol::Udp | DnsProtocol::Tcp => {
-                self.forward_udp(&query_with_ecs, &server.ip, server.port)
+                self.forward_udp(&upstream_query, &server.ip, server.port)
                     .await
             }
             DnsProtocol::Doh => {
@@ -781,12 +1003,12 @@ impl DnsHandler {
                     .doh_url
                     .as_deref()
                     .unwrap_or("https://cloudflare-dns.com/dns-query");
-                self.forward_doh(&query_with_ecs, url).await
+                self.forward_doh(&upstream_query, url).await
             }
             DnsProtocol::Dot => {
                 // DoT 默认端口为 853
                 let port = if server.port == 53 { 853 } else { server.port };
-                self.forward_dot(&query_with_ecs, &server.ip, port).await
+                self.forward_dot(&upstream_query, &server.ip, port).await
             }
         }
     }
@@ -961,40 +1183,75 @@ impl DnsHandler {
         }
     }
 
-    // 创建阻止响应（返回0.0.0.0）
-    fn create_blocked_response(&self, query: &Message, _listen_addr: &str) -> Vec<u8> {
+    /// 构造响应骨架：回显查询段并置 QR=1
+    ///
+    /// `Message::new()` 默认是 Query 报文（QR=0），直接下发会被客户端
+    /// 当成非法响应丢弃，因此所有自造响应都必须经过这里设置响应类型。
+    fn build_response(&self, query: &Message, code: ResponseCode) -> Message {
         let mut response = Message::new();
         response.set_id(query.id());
-        response.set_response_code(trust_dns_proto::op::ResponseCode::NoError);
+        response.set_message_type(MessageType::Response);
+        response.set_op_code(query.op_code());
+        response.set_recursion_desired(query.recursion_desired());
+        response.set_recursion_available(true);
+        response.set_response_code(code);
 
         if let Some(q) = query.queries().first() {
             response.add_query(q.clone());
+        }
 
-            // 添加A记录指向0.0.0.0
-            let record = Record::from_rdata(
-                q.name().clone(),
-                300, // TTL 300秒
-                RData::A(trust_dns_client::rr::rdata::A(std::net::Ipv4Addr::new(
-                    0, 0, 0, 0,
+        response
+    }
+
+    /// 创建广告/规则拦截响应
+    ///
+    /// 按查询类型返回黑洞地址：A 回 0.0.0.0、AAAA 回 ::，让应用立刻连接失败；
+    /// 其它类型没有黑洞语义，回空答案（NODATA）。统一用 NOERROR，
+    /// 避免与「域名真的不存在」在客户端负缓存里混为一谈。
+    fn create_blocked_response(&self, query: &Message) -> Vec<u8> {
+        let mut response = self.build_response(query, ResponseCode::NoError);
+
+        if let Some(q) = query.queries().first() {
+            let blackhole = match q.query_type() {
+                RecordType::A => Some(RData::A(trust_dns_client::rr::rdata::A(
+                    std::net::Ipv4Addr::UNSPECIFIED,
                 ))),
-            );
-            response.add_answer(record);
+                RecordType::AAAA => Some(RData::AAAA(trust_dns_client::rr::rdata::AAAA(
+                    Ipv6Addr::UNSPECIFIED,
+                ))),
+                _ => None,
+            };
+
+            if let Some(rdata) = blackhole {
+                response.add_answer(Record::from_rdata(q.name().clone(), 300, rdata));
+            }
         }
 
         response.to_bytes().unwrap_or_default()
     }
 
-    // 创建NXDOMAIN响应
+    /// 创建 NODATA 响应（NOERROR + 空答案）
+    ///
+    /// 用于「这个类型的记录不该存在」的场景，例如屏蔽 IPv6 时的 AAAA 查询：
+    /// 客户端读到空答案会立刻改用 IPv4，而不是去连一个黑洞地址。
+    fn create_nodata_response(&self, query: &Message) -> Vec<u8> {
+        self.build_response(query, ResponseCode::NoError)
+            .to_bytes()
+            .unwrap_or_default()
+    }
+
+    /// 创建 NXDOMAIN 响应
     fn create_nxdomain_response(&self, query: &Message) -> Vec<u8> {
-        let mut response = Message::new();
-        response.set_id(query.id());
-        response.set_response_code(trust_dns_proto::op::ResponseCode::NXDomain);
+        self.build_response(query, ResponseCode::NXDomain)
+            .to_bytes()
+            .unwrap_or_default()
+    }
 
-        if let Some(q) = query.queries().first() {
-            response.add_query(q.clone());
-        }
-
-        response.to_bytes().unwrap_or_default()
+    /// 创建 SERVFAIL 响应
+    fn create_servfail_response(&self, query: &Message) -> Vec<u8> {
+        self.build_response(query, ResponseCode::ServFail)
+            .to_bytes()
+            .unwrap_or_default()
     }
 
     fn record_success(
@@ -1026,12 +1283,7 @@ impl DnsHandler {
             group: group.to_string(),
         };
 
-        if let Ok(mut logs) = self.logs.lock() {
-            logs.insert(0, log);
-            if logs.len() > 1000 {
-                logs.truncate(1000);
-            }
-        }
+        self.push_log(log);
 
         // 更新流量统计
         if let Ok(mut traffic) = self.traffic_stats.lock() {
@@ -1067,20 +1319,47 @@ impl DnsHandler {
             group: String::new(),
         };
 
-        if let Ok(mut logs) = self.logs.lock() {
-            logs.insert(0, log);
-        }
+        self.push_log(log);
 
         // 更新流量统计
         if let Ok(mut traffic) = self.traffic_stats.lock() {
             traffic.record_to_bucket(true, false);
             traffic.record_domain(domain);
         }
-
-        info!("DNS阻止: {} {}", domain, qtype);
     }
 
-    fn record_cached(&self, domain: &str, qtype: &str, start: Instant) {
+    fn record_failure(&self, domain: &str, qtype: &str, upstream: &str, start: Instant) {
+        let mut stats = self.stats.lock().unwrap();
+        stats.total_queries += 1;
+
+        let mut counter = self.log_id_counter.lock().unwrap();
+        let id = *counter;
+        *counter += 1;
+
+        let log = DnsQueryLog {
+            id,
+            timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+            domain: domain.to_string(),
+            query_type: qtype.to_string(),
+            response: "servfail".to_string(),
+            upstream: upstream.to_string(),
+            latency_ms: start.elapsed().as_millis() as u64,
+            action: "failed".to_string(),
+            group: String::new(),
+        };
+
+        self.push_log(log);
+
+        // 失败请求仍计入流量统计，不计入 blocked/cached。
+        if let Ok(mut traffic) = self.traffic_stats.lock() {
+            traffic.record_to_bucket(false, false);
+            traffic.record_domain(domain);
+        }
+
+        warn!("DNS查询失败: {} {} via {}", domain, qtype, upstream);
+    }
+
+    fn record_cached(&self, domain: &str, qtype: &str, response: &str, start: Instant) {
         let mut stats = self.stats.lock().unwrap();
         stats.total_queries += 1;
         stats.cached_queries += 1;
@@ -1094,16 +1373,14 @@ impl DnsHandler {
             timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
             domain: domain.to_string(),
             query_type: qtype.to_string(),
-            response: "cached".to_string(),
+            response: response.to_string(),
             upstream: "cache".to_string(),
             latency_ms: start.elapsed().as_millis() as u64,
             action: "cached".to_string(),
             group: String::new(),
         };
 
-        if let Ok(mut logs) = self.logs.lock() {
-            logs.insert(0, log);
-        }
+        self.push_log(log);
 
         // 更新流量统计
         if let Ok(mut traffic) = self.traffic_stats.lock() {
@@ -1111,10 +1388,47 @@ impl DnsHandler {
             traffic.record_domain(domain);
             traffic.record_latency(start.elapsed().as_millis() as u64);
         }
+
+        // 缓存命中此前不写文件日志，排查时看起来像「查询没进来」
+        info!(
+            "DNS查询(缓存命中): {} {} -> {} ({}ms)",
+            domain,
+            qtype,
+            response,
+            start.elapsed().as_millis()
+        );
     }
 
-    pub fn get_logs(&self) -> Vec<DnsQueryLog> {
-        self.logs.lock().unwrap().clone()
+    /// 写入查询日志
+    ///
+    /// 所有日志路径统一走这里，保证截断逻辑不会被漏掉导致日志无界增长。
+    fn push_log(&self, log: DnsQueryLog) {
+        if let Ok(mut logs) = self.logs.lock() {
+            logs.insert(0, log);
+            if logs.len() > MAX_LOG_ENTRIES {
+                logs.truncate(MAX_LOG_ENTRIES);
+            }
+        }
+    }
+
+    /// 取最近 limit 条查询日志（新到旧），供前端首次加载与仪表盘使用
+    pub fn get_logs(&self, limit: usize) -> Vec<DnsQueryLog> {
+        let logs = self.logs.lock().unwrap();
+        let count = limit.min(logs.len());
+        logs[..count].to_vec()
+    }
+
+    /// 取 id 大于 since_id 的日志（旧到新），供前端增量刷新
+    pub fn get_logs_since(&self, since_id: u64) -> Vec<DnsQueryLog> {
+        let logs = self.logs.lock().unwrap();
+        // 日志按 id 降序存放，从最新的开始取到已见过的 id 为止
+        let mut fresh: Vec<DnsQueryLog> = logs
+            .iter()
+            .take_while(|log| log.id > since_id)
+            .cloned()
+            .collect();
+        fresh.reverse();
+        fresh
     }
 
     pub fn get_stats(&self) -> (u64, u64, u64, f64) {
@@ -1146,30 +1460,58 @@ impl DnsHandler {
         self.config.lock().unwrap().clone()
     }
 
+    /// 同一问题只记录一次告警
+    ///
+    /// 这类问题（例如某分组没有可用上游）会在每次查询时重复出现，
+    /// 不去重会把日志刷爆；配置变更会重建 handler，标识随之清空。
+    fn warn_once(&self, key: &str, message: &str) {
+        let mut warned = self.warned_messages.lock().unwrap();
+        if warned.insert(key.to_string()) {
+            warn!("{}", message);
+        }
+    }
+
     /// 获取流量统计数据
     pub fn get_traffic_stats(&self) -> TrafficStats {
-        let traffic = self.traffic_stats.lock().unwrap();
+        // 锁顺序必须与 record_success 等保持一致（stats -> traffic），
+        // 否则与 record_* 并发时会死锁。
         let stats = self.stats.lock().unwrap();
+        let traffic = self.traffic_stats.lock().unwrap();
 
-        // 构建时间线数据
-        let timeline: Vec<TimeBucket> = traffic
-            .minute_buckets
-            .iter()
-            .map(|(time, (total, blocked, cached))| TimeBucket {
-                time: time.clone(),
-                total: *total,
-                blocked: *blocked,
-                cached: *cached,
+        // 构建时间线：固定最近 60 分钟，按时间正序
+        //
+        // 固定长度有两个好处：图表横轴稳定；这个接口被首页每 2 秒轮询一次，
+        // 返回时长固定才不会随时间线性增长。
+        // 逐分钟向前查表而不是直接遍历 map，跨零点时顺序同样正确。
+        let now_minute = TrafficStatsCollector::minute_of_day() as i64;
+        let timeline: Vec<TimeBucket> = (0..TIMELINE_MINUTES)
+            .rev()
+            .map(|offset| {
+                let minute = (now_minute - offset).rem_euclid(24 * 60) as u32;
+                let (total, blocked, cached) = traffic
+                    .minute_buckets
+                    .get(&minute)
+                    .copied()
+                    .unwrap_or((0, 0, 0));
+                TimeBucket {
+                    time: format!("{:02}:{:02}", minute / 60, minute % 60),
+                    total,
+                    blocked,
+                    cached,
+                }
             })
             .collect();
 
         // 构建 Top 10 域名
+        //
+        // 次数相同时按域名升序兜底：domain_counts 是 HashMap，迭代顺序每次随机，
+        // 只按次数排序会让并列域名在图表里反复跳位（首页每 2 秒刷新一次）。
         let mut domain_vec: Vec<(String, u64)> = traffic
             .domain_counts
             .iter()
             .map(|(k, v)| (k.clone(), *v))
             .collect();
-        domain_vec.sort_by(|a, b| b.1.cmp(&a.1));
+        domain_vec.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         let top_domains: Vec<DomainStat> = domain_vec
             .into_iter()
             .take(10)
@@ -1255,18 +1597,21 @@ impl DnsHandler {
             group: String::new(),
         };
 
-        if let Ok(mut logs) = self.logs.lock() {
-            logs.insert(0, log);
-            if logs.len() > 1000 {
-                logs.truncate(1000);
-            }
-        }
+        self.push_log(log);
 
         // 更新流量统计（合并的请求不计入延迟分布）
         if let Ok(mut traffic) = self.traffic_stats.lock() {
             traffic.record_to_bucket(false, false);
             traffic.record_domain(domain);
         }
+
+        // 追随者的响应来自领导者的上游查询，同样需要留痕
+        info!(
+            "DNS查询(请求合并): {} {} 由同域名的并发查询代为完成 ({}ms)",
+            domain,
+            qtype,
+            start.elapsed().as_millis()
+        );
     }
 
     /// 通知所有等待中的追随者（领导者完成查询后调用）
@@ -1289,10 +1634,17 @@ impl DnsHandler {
 
 // TrafficStatsCollector 实现
 impl TrafficStatsCollector {
+    /// 当前时刻对应的「当天第几分钟」
+    fn minute_of_day() -> u32 {
+        use chrono::Timelike;
+        let now = chrono::Local::now();
+        now.hour() * 60 + now.minute()
+    }
+
     /// 记录查询到时间桶
     fn record_to_bucket(&mut self, is_blocked: bool, is_cached: bool) {
-        let time_key = chrono::Local::now().format("%H:%M").to_string();
-        let entry = self.minute_buckets.entry(time_key).or_insert((0, 0, 0));
+        let now_minute = Self::minute_of_day();
+        let entry = self.minute_buckets.entry(now_minute).or_insert((0, 0, 0));
         entry.0 += 1; // total
         if is_blocked {
             entry.1 += 1; // blocked
@@ -1301,17 +1653,11 @@ impl TrafficStatsCollector {
             entry.2 += 1; // cached
         }
 
-        // 只保留最近 60 分钟的数据
-        let cutoff = (chrono::Local::now() - chrono::Duration::minutes(60))
-            .format("%H:%M")
-            .to_string();
-        while let Some(first_key) = self.minute_buckets.keys().next().cloned() {
-            if first_key < cutoff {
-                self.minute_buckets.remove(&first_key);
-            } else {
-                break;
-            }
-        }
+        // 按真实时间差裁剪，跨零点用回绕取模
+        self.minute_buckets.retain(|minute, _| {
+            let elapsed = (now_minute as i64 - *minute as i64).rem_euclid(24 * 60);
+            elapsed < TIMELINE_MINUTES
+        });
     }
 
     /// 记录域名查询
@@ -1374,4 +1720,578 @@ async fn fetch_public_ip(client: &reqwest::Client) -> Option<IpAddr> {
 
     warn!("所有公网 IP 服务均不可用");
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn record_cached_does_not_deadlock() {
+        let handler = Arc::new(DnsHandler::new(
+            Arc::new(Mutex::new(AppConfig::default())),
+            Arc::new(DnsCache::new(16, Duration::from_secs(300))),
+        ));
+        let worker = handler.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        std::thread::spawn(move || {
+            worker.record_cached("example.com", "A", "1.2.3.4", Instant::now());
+            tx.send(()).unwrap();
+        });
+
+        rx.recv_timeout(Duration::from_millis(250))
+            .expect("缓存命中记录不应阻塞");
+        assert_eq!(handler.get_stats().2, 1);
+    }
+
+    #[test]
+    fn log_buffer_is_capped_on_every_record_path() {
+        let handler = DnsHandler::new(
+            Arc::new(Mutex::new(AppConfig::default())),
+            Arc::new(DnsCache::new(16, Duration::from_secs(300))),
+        );
+        let start = Instant::now();
+
+        // 缓存命中与阻止路径过去缺少截断，这里确认都不会突破上限
+        for _ in 0..(MAX_LOG_ENTRIES + 50) {
+            handler.record_cached("cache.example", "A", "1.2.3.4", start);
+            handler.record_blocked("blocked.example", "A", "blocklist", start);
+        }
+
+        assert_eq!(handler.get_logs(MAX_LOG_ENTRIES * 2).len(), MAX_LOG_ENTRIES);
+    }
+
+    #[test]
+    fn incremental_logs_only_return_newer_entries() {
+        let handler = DnsHandler::new(
+            Arc::new(Mutex::new(AppConfig::default())),
+            Arc::new(DnsCache::new(16, Duration::from_secs(300))),
+        );
+        let start = Instant::now();
+        handler.record_cached("first.example", "A", "1.2.3.4", start);
+        let cursor = handler.get_logs(1)[0].id;
+        handler.record_cached("second.example", "A", "1.2.3.4", start);
+
+        let fresh = handler.get_logs_since(cursor);
+        assert_eq!(fresh.len(), 1);
+        assert_eq!(fresh[0].domain, "second.example");
+    }
+
+    #[test]
+    fn recent_logs_are_limited_by_requested_count() {
+        let handler = DnsHandler::new(
+            Arc::new(Mutex::new(AppConfig::default())),
+            Arc::new(DnsCache::new(16, Duration::from_secs(300))),
+        );
+        let start = Instant::now();
+        for _ in 0..20 {
+            handler.record_cached("limit.example", "A", "1.2.3.4", start);
+        }
+
+        assert_eq!(handler.get_logs(10).len(), 10);
+        // 请求条数超过实际条数时不应报错
+        assert_eq!(handler.get_logs(1000).len(), 20);
+    }
+
+    #[test]
+    fn warn_once_records_each_key_only_once() {
+        let handler = DnsHandler::new(
+            Arc::new(Mutex::new(AppConfig::default())),
+            Arc::new(DnsCache::new(16, Duration::from_secs(300))),
+        );
+
+        handler.warn_once("group_without_server:proxy", "分组没有可用服务器");
+        handler.warn_once("group_without_server:proxy", "分组没有可用服务器");
+        handler.warn_once("no_enabled_server", "没有启用的DNS服务器");
+
+        assert_eq!(handler.warned_messages.lock().unwrap().len(), 2);
+    }
+
+    /// 构造一条指定类型的查询报文
+    fn build_query(domain: &str, query_type: RecordType) -> Message {
+        let mut message = Message::new();
+        message.set_id(0x4321);
+        message.set_message_type(MessageType::Query);
+        message.set_recursion_desired(true);
+
+        let mut query = trust_dns_proto::op::Query::new();
+        query.set_name(trust_dns_client::rr::Name::from_ascii(domain).expect("合法域名"));
+        query.set_query_type(query_type);
+        message.add_query(query);
+
+        message
+    }
+
+    fn handler() -> DnsHandler {
+        DnsHandler::new(
+            Arc::new(Mutex::new(AppConfig::default())),
+            Arc::new(DnsCache::new(16, Duration::from_secs(300))),
+        )
+    }
+
+    /// 首页趋势图的横轴必须固定为 60 个点，否则每 2 秒轮询的返回体
+    /// 会随运行时间线性增长，图表也会越画越密
+    #[test]
+    fn timeline_always_has_exactly_sixty_buckets() {
+        let handler = handler();
+        handler.record_success("a.example.com", "A", "1.1.1.1", "阿里 DNS", 5, "domestic");
+
+        let stats = handler.get_traffic_stats();
+
+        assert_eq!(
+            stats.timeline.len(),
+            TIMELINE_MINUTES as usize,
+            "时间线长度必须固定"
+        );
+        // 最后一格是当前分钟，且记录了刚才那次查询
+        let last = stats.timeline.last().expect("应有最后一格");
+        assert_eq!(last.total, 1, "刚记录的查询应落在当前分钟");
+    }
+
+    /// 趋势图的数据来源：域名排行要按次数降序，延迟分布要能对上总数
+    #[test]
+    fn traffic_stats_feed_the_dashboard_charts() {
+        let handler = handler();
+
+        for _ in 0..3 {
+            handler.record_success("hot.example.com", "A", "1.1.1.1", "阿里 DNS", 5, "domestic");
+        }
+        handler.record_success(
+            "cold.example.com",
+            "A",
+            "2.2.2.2",
+            "阿里 DNS",
+            120,
+            "domestic",
+        );
+        handler.record_blocked("ads.example.com", "A", "blocklist", Instant::now());
+
+        let stats = handler.get_traffic_stats();
+
+        // 按次数降序；cold 与 ads 都是 1 次，此时按域名升序兜底。
+        // 必须断言完整顺序：HashMap 迭代顺序随机，只按次数排会让并列域名
+        // 在每次刷新之间跳位，而这个接口被首页每 2 秒轮询一次。
+        let rank: Vec<(&str, u64)> = stats
+            .top_domains
+            .iter()
+            .map(|item| (item.domain.as_str(), item.count))
+            .collect();
+        assert_eq!(
+            rank,
+            vec![
+                ("hot.example.com", 3),
+                ("ads.example.com", 1),
+                ("cold.example.com", 1),
+            ],
+            "并列次数的域名必须按域名稳定排序"
+        );
+
+        // 延迟分布：5ms 落 0-10ms 桶 3 次，120ms 落 100-200ms 桶 1 次
+        assert_eq!(stats.latency_dist.len(), 6, "延迟分布应有 6 个区间");
+        assert_eq!(stats.latency_dist[0].range, "0-10ms");
+        assert_eq!(stats.latency_dist[0].count, 3);
+        assert_eq!(stats.latency_dist[3].range, "100-200ms");
+        assert_eq!(stats.latency_dist[3].count, 1);
+
+        assert_eq!(stats.total_queries, 5);
+        assert!(stats.queries_per_second >= 0.0);
+    }
+
+    /// 跨零点时不能把当天刚产生的桶当成过期数据删掉
+    ///
+    /// 旧实现用 "HH:MM" 做字典序比较，00:05 < 23:30，于是 0 点到 1 点之间
+    /// 每次记录都会立刻清空时间线，趋势图恒为空。
+    #[test]
+    fn minute_bucket_pruning_survives_midnight_wrap() {
+        let mut collector = TrafficStatsCollector::default();
+
+        // 模拟 23:58 与 23:59 的历史桶，以及新一天 00:01 的记录
+        collector.minute_buckets.insert(23 * 60 + 58, (7, 1, 2));
+        collector.minute_buckets.insert(23 * 60 + 59, (9, 0, 3));
+        collector.minute_buckets.insert(1, (1, 0, 0));
+
+        // 以 00:01 为当前时刻做一次裁剪
+        let now_minute = 1i64;
+        collector.minute_buckets.retain(|minute, _| {
+            let elapsed = (now_minute - *minute as i64).rem_euclid(24 * 60);
+            elapsed < TIMELINE_MINUTES
+        });
+
+        assert_eq!(
+            collector.minute_buckets.get(&1).copied(),
+            Some((1, 0, 0)),
+            "当天新产生的桶不能被删掉"
+        );
+        assert!(
+            collector.minute_buckets.contains_key(&(23 * 60 + 59)),
+            "跨零点时前一分钟仍属于最近 60 分钟，应保留"
+        );
+    }
+
+    #[test]
+    fn traffic_stats_spans_midnight_in_chronological_order() {
+        let mut collector = TrafficStatsCollector::default();
+        collector.start_time = Some(Instant::now());
+        // 昨天 23:59 与今天 00:00 各一条
+        collector.minute_buckets.insert(23 * 60 + 59, (5, 0, 0));
+        collector.minute_buckets.insert(0, (6, 0, 0));
+
+        // 以 00:00 为当前时刻构造时间线，跨越零点
+        let now_minute = 0i64;
+        let timeline: Vec<(String, u64)> = (0..TIMELINE_MINUTES)
+            .rev()
+            .map(|offset| {
+                let minute = (now_minute - offset).rem_euclid(24 * 60) as u32;
+                let (total, _, _) = collector
+                    .minute_buckets
+                    .get(&minute)
+                    .copied()
+                    .unwrap_or((0, 0, 0));
+                (format!("{:02}:{:02}", minute / 60, minute % 60), total)
+            })
+            .collect();
+
+        assert_eq!(timeline.len(), TIMELINE_MINUTES as usize);
+        // 倒数第二格应是昨天 23:59，排在今天 00:00 之前
+        assert_eq!(timeline[timeline.len() - 2], ("23:59".to_string(), 5));
+        assert_eq!(timeline[timeline.len() - 1], ("00:00".to_string(), 6));
+    }
+
+    /// 停用期间 geosite 订阅里的规则不得参与分流
+    ///
+    /// 这条同时锁住两个后果：域名不会被路由到（可能为空的）proxy 分组，
+    /// 也就不会被判为「代理请求」而跳过缓存。
+    #[test]
+    fn disabled_geosite_rules_do_not_route() {
+        let mut config = AppConfig::default();
+        config.subscriptions = vec![Subscription {
+            name: "Proxy 需代理域名".to_string(),
+            url: String::new(),
+            enabled: true,
+            rules: vec!["routed.example.com".to_string()],
+            last_updated: None,
+            sub_type: SubscriptionType::Geosite,
+            target_group: Some("proxy".to_string()),
+        }];
+
+        let handler = DnsHandler::new(
+            Arc::new(Mutex::new(config)),
+            Arc::new(DnsCache::new(16, Duration::from_secs(300))),
+        );
+
+        assert!(
+            !GEOSITE_ROUTING_ENABLED,
+            "当前阶段约定全部走直连，若改为 true 请同步更新本用例与规则页"
+        );
+        assert_eq!(
+            handler.check_geosite("routed.example.com"),
+            None,
+            "域名路由停用期间不得把域名分流到其它分组"
+        );
+        assert_eq!(
+            handler.check_geosite("sub.routed.example.com"),
+            None,
+            "父域名匹配同样不得生效"
+        );
+    }
+
+    /// 黑名单不受域名路由停用影响，广告过滤必须照常工作
+    #[test]
+    fn blocklist_still_applies_while_geosite_is_disabled() {
+        let mut config = AppConfig::default();
+        config.subscriptions = vec![
+            Subscription {
+                name: "广告拦截域名".to_string(),
+                url: String::new(),
+                enabled: true,
+                rules: vec!["ads.example.com".to_string()],
+                last_updated: None,
+                sub_type: SubscriptionType::Blocklist,
+                target_group: None,
+            },
+            Subscription {
+                name: "Proxy 需代理域名".to_string(),
+                url: String::new(),
+                enabled: true,
+                rules: vec!["normal.example.com".to_string()],
+                last_updated: None,
+                sub_type: SubscriptionType::Geosite,
+                target_group: Some("proxy".to_string()),
+            },
+        ];
+
+        let handler = DnsHandler::new(
+            Arc::new(Mutex::new(config)),
+            Arc::new(DnsCache::new(16, Duration::from_secs(300))),
+        );
+
+        assert!(
+            handler.is_blocked("ads.example.com"),
+            "广告过滤订阅必须仍然生效"
+        );
+        assert!(
+            handler.is_blocked("sub.ads.example.com"),
+            "黑名单的父域名匹配必须仍然生效"
+        );
+        assert!(!handler.is_blocked("normal.example.com"));
+    }
+
+    /// 自造响应必须是合法响应报文，否则客户端会当垃圾包丢掉
+    #[test]
+    fn self_built_responses_set_the_qr_bit() {
+        let handler = handler();
+        let query = build_query("ads.example.com", RecordType::A);
+
+        for bytes in [
+            handler.create_blocked_response(&query),
+            handler.create_nodata_response(&query),
+            handler.create_nxdomain_response(&query),
+            handler.create_servfail_response(&query),
+        ] {
+            let response = Message::from_bytes(&bytes).expect("响应必须可解析");
+            assert_eq!(
+                response.message_type(),
+                MessageType::Response,
+                "自造响应必须置 QR=1，Message::new() 默认是 Query"
+            );
+            assert_eq!(response.id(), 0x4321, "必须保留原始事务 ID");
+            assert_eq!(response.queries().len(), 1, "必须回显查询段");
+        }
+    }
+
+    #[test]
+    fn blocked_a_query_returns_blackhole_address() {
+        let handler = handler();
+        let bytes = handler.create_blocked_response(&build_query("ads.example.com", RecordType::A));
+        let response = Message::from_bytes(&bytes).unwrap();
+
+        assert_eq!(response.response_code(), ResponseCode::NoError);
+        assert_eq!(response.answers().len(), 1);
+        assert_eq!(
+            response.answers()[0].data().map(|d| d.to_string()),
+            Some("0.0.0.0".to_string()),
+            "A 查询应返回 0.0.0.0"
+        );
+    }
+
+    #[test]
+    fn blocked_aaaa_query_returns_blackhole_address_instead_of_an_a_record() {
+        let handler = handler();
+        let bytes =
+            handler.create_blocked_response(&build_query("ads.example.com", RecordType::AAAA));
+        let response = Message::from_bytes(&bytes).unwrap();
+
+        assert_eq!(response.answers().len(), 1);
+        assert_eq!(
+            response.answers()[0].record_type(),
+            RecordType::AAAA,
+            "AAAA 查询不能拿到 A 记录"
+        );
+        assert_eq!(
+            response.answers()[0].data().map(|d| d.to_string()),
+            Some("::".to_string())
+        );
+    }
+
+    #[test]
+    fn blocked_query_of_other_types_returns_empty_answer() {
+        let handler = handler();
+        let bytes =
+            handler.create_blocked_response(&build_query("ads.example.com", RecordType::MX));
+        let response = Message::from_bytes(&bytes).unwrap();
+
+        assert_eq!(response.response_code(), ResponseCode::NoError);
+        assert!(
+            response.answers().is_empty(),
+            "没有黑洞语义的类型应回空答案（NODATA）"
+        );
+    }
+
+    #[test]
+    fn blocklist_rule_type_matches_domain_and_subdomains() {
+        let mut config = AppConfig::default();
+        config.rules = vec![crate::config::Rule {
+            name: "拦截示例".to_string(),
+            pattern: "ads.example.com".to_string(),
+            rule_type: RuleType::Blocklist,
+            action: RuleAction::Block,
+            target: None,
+            enabled: true,
+            priority: 1,
+        }];
+        let handler = DnsHandler::new(
+            Arc::new(Mutex::new(config)),
+            Arc::new(DnsCache::new(16, Duration::from_secs(300))),
+        );
+
+        assert!(
+            handler.check_rules("ads.example.com").is_some(),
+            "应匹配域名本身"
+        );
+        assert!(
+            handler.check_rules("cdn.ads.example.com").is_some(),
+            "应匹配子域名"
+        );
+        assert!(
+            handler.check_rules("notads.example.com").is_none(),
+            "不应误伤同后缀但不同标签的域名"
+        );
+        assert!(
+            handler.check_rules("example.com").is_none(),
+            "不应把父域名一起拦掉"
+        );
+    }
+
+    /// 构造一条查询，可指定 ID 与 EDNS0 载荷尺寸
+    fn build_query_with_id(domain: &str, id: u16, udp_payload: Option<u16>) -> Vec<u8> {
+        let mut message = build_query(domain, RecordType::A);
+        message.set_id(id);
+
+        if let Some(payload) = udp_payload {
+            let mut edns = Edns::new();
+            edns.set_max_payload(payload);
+            edns.set_dnssec_ok(true);
+            message.set_edns(edns);
+        }
+
+        message.to_bytes().expect("查询序列化失败")
+    }
+
+    /// 构造一条「别的查询」产生的响应，模拟缓存命中与请求合并借用的字节
+    fn foreign_response(domain: &str, foreign_id: u16) -> Vec<u8> {
+        let mut message = Message::new();
+        message.set_id(foreign_id);
+        message.set_message_type(MessageType::Response);
+        message.set_recursion_available(true);
+
+        let mut query = trust_dns_proto::op::Query::new();
+        query.set_name(trust_dns_client::rr::Name::from_ascii(domain).expect("合法域名"));
+        query.set_query_type(RecordType::A);
+        message.add_query(query);
+        message.add_answer(Record::from_rdata(
+            trust_dns_client::rr::Name::from_ascii(domain).expect("合法域名"),
+            300,
+            RData::A(trust_dns_client::rr::rdata::A(std::net::Ipv4Addr::new(
+                1, 2, 3, 4,
+            ))),
+        ));
+
+        message.to_bytes().expect("响应序列化失败")
+    }
+
+    /// 缓存命中与请求合并返回的是别的查询的响应字节，必须重写成当前查询的 ID，
+    /// 否则客户端会判为非法报文（Windows 解析器报 Bad DNS packet 并丢弃）
+    #[test]
+    fn borrowed_response_gets_the_current_query_id() {
+        let query_bytes = build_query_with_id("cached.example.com", 0xbeef, None);
+        let response = foreign_response("cached.example.com", 0x0abc);
+
+        let normalized = normalize_response_for_client(&query_bytes, response);
+        let message = Message::from_bytes(&normalized).expect("规范化后必须可解析");
+
+        assert_eq!(
+            message.id(),
+            0xbeef,
+            "回包事务 ID 必须是本次查询的 ID，而不是被借用响应的旧 ID"
+        );
+        assert_eq!(message.answers().len(), 1, "答案内容不应被改动");
+    }
+
+    /// 上游查询必须向上游声明 4096，而不是沿用客户端在 UDP 上声明的小尺寸
+    #[test]
+    fn upstream_query_raises_advertised_payload_size() {
+        let client_query = build_query_with_id("example.com", 0x1234, Some(512));
+
+        let upstream = prepare_upstream_query(&client_query);
+        let message = Message::from_bytes(&upstream).expect("上游查询必须可解析");
+        let edns = message.extensions().as_ref().expect("应保留 EDNS0");
+
+        assert_eq!(
+            edns.max_payload(),
+            UPSTREAM_EDNS_PAYLOAD,
+            "传给上游的尺寸必须是 4096，否则上游按 512 截断、TCP 重试也会拿到 TC"
+        );
+        assert!(edns.dnssec_ok(), "抬高尺寸不应丢掉客户端的 DO 位");
+    }
+
+    /// 客户端没带 EDNS0 时，上游查询要补上 OPT，才能向支持 EDNS0 的上游取全量答案
+    #[test]
+    fn upstream_query_adds_edns_when_client_omitted_it() {
+        let client_query = build_query_with_id("example.com", 0x1234, None);
+
+        let upstream = prepare_upstream_query(&client_query);
+        let message = Message::from_bytes(&upstream).expect("上游查询必须可解析");
+        let edns = message.extensions().as_ref().expect("应补上 EDNS0");
+
+        assert_eq!(edns.max_payload(), UPSTREAM_EDNS_PAYLOAD);
+    }
+
+    /// 客户端已声明不小于上限时不应重新编码，原样透传
+    #[test]
+    fn upstream_query_is_untouched_when_client_already_advertises_enough() {
+        let client_query = build_query_with_id("example.com", 0x1234, Some(4096));
+
+        assert_eq!(
+            prepare_upstream_query(&client_query),
+            client_query,
+            "尺寸已够大时不应改动报文"
+        );
+    }
+
+    /// RFC 6891 §7：请求方没带 OPT 时不得回带 OPT。本代理为取全量会主动加 OPT，
+    /// 因此回给客户端的报文必须按客户端情况摘掉
+    #[test]
+    fn opt_is_stripped_for_clients_that_did_not_use_edns() {
+        let query_bytes = build_query_with_id("example.com", 0x1234, None);
+
+        // 用一条带上游 OPT 的响应模拟上游回包
+        let mut response_message =
+            Message::from_bytes(&foreign_response("example.com", 0x1234)).expect("响应可解析");
+        let mut edns = Edns::new();
+        edns.set_max_payload(UPSTREAM_EDNS_PAYLOAD);
+        response_message.set_edns(edns);
+        let response_with_opt = response_message.to_bytes().unwrap();
+
+        let normalized = normalize_response_for_client(&query_bytes, response_with_opt);
+        let message = Message::from_bytes(&normalized).expect("规范化后必须可解析");
+
+        assert!(
+            message.extensions().is_none(),
+            "客户端没用 EDNS0，回包不应带 OPT"
+        );
+    }
+
+    /// EDNS0 客户端应保留上游回带的 OPT，不能一并摘掉
+    #[test]
+    fn opt_is_kept_for_edns_clients() {
+        let query_bytes = build_query_with_id("example.com", 0x1234, Some(4096));
+        let mut response_message =
+            Message::from_bytes(&foreign_response("example.com", 0x1234)).expect("响应可解析");
+        let mut edns = Edns::new();
+        edns.set_max_payload(UPSTREAM_EDNS_PAYLOAD);
+        response_message.set_edns(edns);
+        let response_with_opt = response_message.to_bytes().unwrap();
+
+        let normalized = normalize_response_for_client(&query_bytes, response_with_opt);
+        let message = Message::from_bytes(&normalized).expect("规范化后必须可解析");
+
+        assert!(
+            message.extensions().is_some(),
+            "EDNS0 客户端的回包应保留 OPT"
+        );
+    }
+
+    /// ID 已一致且客户端使用 EDNS0 时应走快路径，不重新编码上游原包
+    #[test]
+    fn matching_response_for_edns_client_is_passed_through_unchanged() {
+        let query_bytes = build_query_with_id("example.com", 0x1234, Some(4096));
+        let response = foreign_response("example.com", 0x1234);
+
+        assert_eq!(
+            normalize_response_for_client(&query_bytes, response.clone()),
+            response,
+            "无需改写时不应触碰上游原包"
+        );
+    }
 }

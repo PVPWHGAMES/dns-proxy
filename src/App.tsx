@@ -4,7 +4,7 @@ import Dashboard from "./pages/Dashboard";
 import Settings from "./pages/Settings";
 import Rules from "./pages/Rules";
 import Logs from "./pages/Logs";
-import NetworkSettings from "./pages/NetworkSettings";
+
 import About from "./pages/About";
 
 function App() {
@@ -14,7 +14,7 @@ function App() {
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/settings" element={<Settings />} />
-          <Route path="/network" element={<NetworkSettings />} />
+
           <Route path="/rules" element={<Rules />} />
           <Route path="/logs" element={<Logs />} />
           <Route path="/about" element={<About />} />

@@ -16,6 +16,14 @@ import { api, AppConfig, Rule, RuleType, RuleAction, Subscription, SubscriptionT
 import MessageBanner from "../components/ui/MessageBanner";
 import Badge from "../components/ui/Badge";
 
+/**
+ * 是否展示「域名路由规则」区块
+ *
+ * 当前阶段所有查询都走直连，域名路由已停用（后端 `GEOSITE_ROUTING_ENABLED = false`），
+ * 因此这里先隐藏入口。实现完整保留，恢复按域名分流时改回 true 即可。
+ */
+const ROUTING_RULES_ENABLED = false;
+
 // 可展开的订阅规则列表组件
 function SubscriptionRules({
   sub,
@@ -394,7 +402,8 @@ export default function Rules() {
         )}
       </div>
 
-      {/* ========== 域名路由规则 ========== */}
+      {/* ========== 域名路由规则（当前停用，见 ROUTING_RULES_ENABLED）========== */}
+      {ROUTING_RULES_ENABLED && (
       <div className="bg-card rounded-xl border">
         <div className="p-4 border-b flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -579,6 +588,7 @@ export default function Rules() {
           )}
         </div>
       </div>
+      )}
 
       {/* ========== 自定义规则 ========== */}
       <div className="bg-card rounded-xl border">
@@ -712,10 +722,12 @@ export default function Rules() {
             <p className="font-medium text-orange-700 dark:text-orange-400">正则表达式</p>
             <p className="text-muted-foreground mt-1">使用正则匹配，如 <code>.*\.example\.com</code></p>
           </div>
+          {ROUTING_RULES_ENABLED && (
           <div className="p-3 bg-red-50 dark:bg-red-500/10 rounded-lg">
             <p className="font-medium text-red-700 dark:text-red-400">域名路由</p>
             <p className="text-muted-foreground mt-1">GeoSite 列表，按域名分流到不同服务器组</p>
           </div>
+          )}
         </div>
       </div>
     </div>

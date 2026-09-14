@@ -1,53 +1,141 @@
 mod config;
 mod dns;
-mod tun;
+mod system_dns;
 
 use config::AppConfig;
 use dns::server::DnsServer;
 use dns::{CacheStats, DnsQueryLog, DnsStats, PoolStats, TrafficStats};
 use std::path::PathBuf;
 use std::sync::Arc;
+use system_dns::DnsSnapshot;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, State};
 use tokio::sync::Mutex;
 use tracing_subscriber::prelude::*;
-use tun::device::TunDevice;
-use tun::dns_intercept::DnsInterceptor;
-use tun::{TunConfig, TunStatus};
 
 pub struct AppState {
     server: Arc<Mutex<DnsServer>>,
-    config: Arc<Mutex<AppConfig>>,
-    tun_device: Arc<Mutex<TunDevice>>,
-    tun_config: Arc<Mutex<TunConfig>>,
-    tun_starting: Arc<Mutex<bool>>,
+    /// 与 `DnsHandler` 共享同一份配置实例
+    ///
+    /// 用标准库互斥锁而非 tokio 的：处理器侧原本就是标准库锁，改成 tokio 需要把
+    /// 十几处 `lock().unwrap()` 全改成 `.lock().await`；反过来只改状态这一侧更小。
+    /// 注意所有使用点都不得把锁守卫跨过 await。
+    config: Arc<std::sync::Mutex<AppConfig>>,
     latency_results: Arc<Mutex<Vec<DnsLatencyResult>>>,
     latency_last_test: Arc<Mutex<Option<String>>>,
+    /// 系统 DNS 接管前的原始配置，None 表示当前未接管
+    ///
+    /// 用标准库互斥锁而不是 tokio 的：退出事件处理器是同步上下文，
+    /// 那里必须能不带 async 直接完成还原，否则进程退出后网卡仍指向 127.0.0.1。
+    dns_snapshot: Arc<std::sync::Mutex<Option<DnsSnapshot>>>,
+}
+
+/// 取共享配置的锁，中毒时沿用内部数据
+///
+/// 配置里存的是订阅规则等可再生数据，因一次 panic 就把整份配置判死会让进程再也读不到它。
+fn lock_config(config: &std::sync::Mutex<AppConfig>) -> std::sync::MutexGuard<'_, AppConfig> {
+    config
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// 取锁并在中毒时沿用内部数据：这里保存的是还原所需的唯一凭据，
+/// 因为一次 panic 就丢弃快照会让系统 DNS 永久回不去。
+fn lock_snapshot(
+    slot: &std::sync::Mutex<Option<DnsSnapshot>>,
+) -> std::sync::MutexGuard<'_, Option<DnsSnapshot>> {
+    slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// 按需接管或还原系统 DNS
+///
+/// 接管成功才记录快照；还原依据快照而不是「一律重置为 DHCP」，
+/// 否则会抹掉用户手工配置的静态 DNS。
+fn sync_dns_takeover(
+    slot: &std::sync::Mutex<Option<DnsSnapshot>>,
+    enabled: bool,
+) -> Result<String, String> {
+    let mut guard = lock_snapshot(slot);
+
+    if enabled {
+        if guard.is_some() {
+            return Ok("系统 DNS 已处于接管状态".to_string());
+        }
+
+        let captured = system_dns::capture()?;
+        if captured.adapters.is_empty() {
+            return Err("没有找到在用的网卡，未接管系统 DNS".to_string());
+        }
+
+        // 先落盘再做改动：中途崩溃也能在下次启动时还原
+        system_dns::save_pending(&captured)?;
+
+        if let Err(error) = system_dns::takeover(&captured) {
+            // 可能只改成功一部分，回滚一次再报错，避免留下半接管状态
+            let _ = system_dns::restore(&captured);
+            system_dns::clear_pending();
+            return Err(error);
+        }
+
+        let summary = captured.summary();
+        *guard = Some(captured);
+        Ok(summary)
+    } else {
+        let Some(captured) = guard.take() else {
+            return Ok("系统 DNS 未被接管".to_string());
+        };
+        let result = system_dns::restore(&captured);
+        system_dns::clear_pending();
+        result.map(|_| "系统 DNS 已还原".to_string())
+    }
+}
+
+/// 停止服务或退出时归还系统 DNS，失败只告警不阻断流程
+fn release_dns_takeover(slot: &std::sync::Mutex<Option<DnsSnapshot>>) {
+    if let Err(error) = sync_dns_takeover(slot, false) {
+        tracing::error!(%error, "还原系统 DNS 失败，请手动检查网卡 DNS 设置");
+    }
 }
 
 #[tauri::command]
 async fn get_config(state: State<'_, AppState>) -> Result<AppConfig, String> {
-    let config = state.config.lock().await;
+    let config = lock_config(&state.config);
     Ok(config.clone())
 }
 
 #[tauri::command]
 async fn save_config(state: State<'_, AppState>, new_config: AppConfig) -> Result<(), String> {
-    let mut config = state.config.lock().await;
-    *config = new_config.clone();
-    config.save().map_err(|e| e.to_string())?;
+    let takeover_enabled = new_config.proxy.takeover_system_dns;
 
-    // 重启服务器以应用新配置
-    let mut server = state.server.lock().await;
-    if server.is_running().await {
-        server.stop().await;
-        // 等待端口释放
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        *server = DnsServer::new(config.clone());
-        server.start().await.map_err(|e| e.to_string())?;
+    {
+        // 就地更新共享配置：服务器与处理器持有的是同一个实例，不需要再各同步一次
+        let mut config = lock_config(&state.config);
+        *config = new_config;
+        config.save().map_err(|e| e.to_string())?;
+    }
+
+    // 重启服务器以应用新配置，沿用同一个配置实例
+    let was_running = {
+        let mut server = state.server.lock().await;
+        let was_running = server.is_running().await;
+        if was_running {
+            server.stop().await;
+            // 等待端口释放
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        }
+        *server = DnsServer::new(state.config.clone());
+        if was_running {
+            server.start().await.map_err(|e| e.to_string())?;
+        }
+        was_running
+    };
+
+    // 接管状态跟随配置：服务在跑才需要接管，停了就还回去
+    if was_running {
+        sync_dns_takeover(&state.dns_snapshot, takeover_enabled)?;
     } else {
-        *server = DnsServer::new(config.clone());
+        release_dns_takeover(&state.dns_snapshot);
     }
 
     Ok(())
@@ -55,16 +143,53 @@ async fn save_config(state: State<'_, AppState>, new_config: AppConfig) -> Resul
 
 #[tauri::command]
 async fn start_server(state: State<'_, AppState>) -> Result<(), String> {
-    let mut server = state.server.lock().await;
-    server.start().await.map_err(|e| e.to_string())?;
+    {
+        let mut server = state.server.lock().await;
+        server.start().await.map_err(|e| e.to_string())?;
+    }
+
+    let takeover = lock_config(&state.config).proxy.takeover_system_dns;
+    if takeover {
+        sync_dns_takeover(&state.dns_snapshot, true)?;
+    }
     Ok(())
 }
 
 #[tauri::command]
 async fn stop_server(state: State<'_, AppState>) -> Result<(), String> {
-    let mut server = state.server.lock().await;
-    server.stop().await;
+    {
+        let mut server = state.server.lock().await;
+        server.stop().await;
+    }
+    release_dns_takeover(&state.dns_snapshot);
     Ok(())
+}
+
+/// 当前系统 DNS 接管状态
+#[derive(serde::Serialize)]
+struct DnsTakeoverStatus {
+    active: bool,
+    /// 接管前的原始配置摘要
+    detail: String,
+    /// 配置项：启动服务时是否自动接管
+    enabled: bool,
+}
+
+#[tauri::command]
+async fn get_dns_takeover_status(state: State<'_, AppState>) -> Result<DnsTakeoverStatus, String> {
+    let enabled = lock_config(&state.config).proxy.takeover_system_dns;
+    let guard = lock_snapshot(&state.dns_snapshot);
+    Ok(DnsTakeoverStatus {
+        active: guard.is_some(),
+        detail: guard.as_ref().map(DnsSnapshot::summary).unwrap_or_default(),
+        enabled,
+    })
+}
+
+/// 手动还原系统 DNS（界面上的兜底入口）
+#[tauri::command]
+async fn restore_system_dns(state: State<'_, AppState>) -> Result<String, String> {
+    sync_dns_takeover(&state.dns_snapshot, false)
 }
 
 #[tauri::command]
@@ -88,10 +213,24 @@ async fn get_stats(state: State<'_, AppState>) -> Result<DnsStats, String> {
     })
 }
 
+/// 取最近 limit 条查询日志（新到旧）
 #[tauri::command]
-async fn get_logs(state: State<'_, AppState>) -> Result<Vec<DnsQueryLog>, String> {
+async fn get_logs(
+    state: State<'_, AppState>,
+    limit: Option<usize>,
+) -> Result<Vec<DnsQueryLog>, String> {
     let server = state.server.lock().await;
-    Ok(server.get_logs())
+    Ok(server.get_logs(limit.unwrap_or(200)))
+}
+
+/// 取 id 大于 since_id 的新日志（旧到新），供前端增量刷新
+#[tauri::command]
+async fn get_logs_since(
+    state: State<'_, AppState>,
+    since_id: u64,
+) -> Result<Vec<DnsQueryLog>, String> {
+    let server = state.server.lock().await;
+    Ok(server.get_logs_since(since_id))
 }
 
 #[tauri::command]
@@ -136,157 +275,35 @@ struct MemoryInfo {
 }
 
 /// 获取当前进程的内存占用
+///
+/// 直接读取进程内存计数器，只查自身进程；前端每秒轮询也无需枚举全系统进程。
 #[tauri::command]
 fn get_memory_usage() -> Result<MemoryInfo, String> {
-    use sysinfo::{Pid, System};
+    use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    use windows::Win32::System::Threading::GetCurrentProcess;
 
-    let pid = std::process::id();
-    let mut system = System::new_all();
-    system.refresh_all();
+    let mut counters = PROCESS_MEMORY_COUNTERS {
+        cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+        ..Default::default()
+    };
 
-    let pid = Pid::from_u32(pid);
-    system
-        .process(pid)
-        .map(|p| MemoryInfo {
-            memory_mb: p.memory() as f64 / (1024.0 * 1024.0),
-            virtual_memory_mb: p.virtual_memory() as f64 / (1024.0 * 1024.0),
-        })
-        .ok_or_else(|| "无法获取进程信息".to_string())
+    unsafe {
+        GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counters.cb)
+            .map_err(|e| format!("获取进程内存信息失败: {}", e))?;
+    }
+
+    Ok(MemoryInfo {
+        memory_mb: counters.WorkingSetSize as f64 / (1024.0 * 1024.0),
+        virtual_memory_mb: counters.PagefileUsage as f64 / (1024.0 * 1024.0),
+    })
 }
 
 #[tauri::command]
 async fn update_subscriptions(state: State<'_, AppState>) -> Result<String, String> {
     let server = state.server.lock().await;
     server.update_subscriptions().await;
-
-    // 同步更新 AppState 中的配置
-    let new_config = server.get_config().await;
-    let mut config = state.config.lock().await;
-    *config = new_config;
-
+    // 配置是服务器与界面共享的同一个实例，处理器更新后这里直接可见，无需再同步一次
     Ok("订阅已更新".to_string())
-}
-
-// TUN 相关命令
-
-#[tauri::command]
-async fn get_tun_config(state: State<'_, AppState>) -> Result<TunConfig, String> {
-    let config = state.tun_config.lock().await;
-    Ok(config.clone())
-}
-
-#[tauri::command]
-async fn save_tun_config(state: State<'_, AppState>, new_config: TunConfig) -> Result<(), String> {
-    let mut tun_config = state.tun_config.lock().await;
-    *tun_config = new_config.clone();
-    drop(tun_config);
-
-    // 同步保存到主配置文件
-    let mut app_config = state.config.lock().await;
-    app_config.tun = new_config;
-    app_config.save().map_err(|e| e.to_string())?;
-
-    Ok(())
-}
-
-#[tauri::command]
-async fn start_tun(state: State<'_, AppState>) -> Result<String, String> {
-    let config = state.tun_config.lock().await;
-    if !config.enabled {
-        return Err("TUN模式未启用，请在配置中启用".to_string());
-    }
-    let tun_config = config.clone();
-    drop(config);
-
-    // 检查是否已在启动中
-    {
-        let starting = state.tun_starting.lock().await;
-        if *starting {
-            return Ok("TUN正在启动中...".to_string());
-        }
-    }
-
-    // 设置启动中状态
-    {
-        let mut starting = state.tun_starting.lock().await;
-        *starting = true;
-    }
-
-    // 克隆需要的 Arc 字段
-    let tun_device = state.tun_device.clone();
-    let tun_starting = state.tun_starting.clone();
-    let server = state.server.clone();
-
-    // 异步启动TUN
-    tokio::spawn(async move {
-        let result = start_tun_internal(tun_device.clone(), server, tun_config).await;
-        let mut starting = tun_starting.lock().await;
-        *starting = false;
-
-        match result {
-            Ok(_) => tracing::info!("TUN异步启动完成"),
-            Err(e) => tracing::error!("TUN异步启动失败: {}", e),
-        }
-    });
-
-    Ok("TUN正在启动...".to_string())
-}
-
-async fn start_tun_internal(
-    tun_device: Arc<Mutex<TunDevice>>,
-    server: Arc<Mutex<DnsServer>>,
-    tun_config: TunConfig,
-) -> Result<(), String> {
-    let mut tun = tun_device.lock().await;
-
-    // 更新TUN设备配置
-    *tun = TunDevice::new(tun_config);
-
-    // 启动TUN设备
-    tun.start().await.map_err(|e| e.to_string())?;
-
-    // 启动DNS拦截器
-    let tun_clone = tun_device.clone();
-    drop(tun);
-    let server = server.lock().await;
-    let handler = server.get_dns_handler();
-    let interceptor = DnsInterceptor::new(tun_clone);
-    interceptor.start(handler).await;
-
-    Ok(())
-}
-
-#[tauri::command]
-async fn stop_tun(state: State<'_, AppState>) -> Result<String, String> {
-    let mut tun = state.tun_device.lock().await;
-    tun.stop().await;
-    Ok("TUN设备已停止".to_string())
-}
-
-#[tauri::command]
-async fn get_tun_status(state: State<'_, AppState>) -> Result<TunStatus, String> {
-    let tun = state.tun_device.lock().await;
-    let config = state.tun_config.lock().await;
-    let starting = state.tun_starting.lock().await;
-
-    let active = tun.is_running().await;
-
-    Ok(TunStatus {
-        active,
-        starting: *starting,
-        interface_name: if active {
-            config.interface_name.clone()
-        } else {
-            String::new()
-        },
-        ip_address: if active {
-            config.gateway.clone()
-        } else {
-            String::new()
-        },
-        dns_redirected: active,
-        packets_processed: 0,
-    })
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -299,14 +316,15 @@ struct DnsLatencyResult {
 
 #[tauri::command]
 async fn test_dns_latency(state: State<'_, AppState>) -> Result<Vec<DnsLatencyResult>, String> {
-    let config = state.config.lock().await;
-    let servers: Vec<_> = config
-        .upstream
-        .iter()
-        .filter(|s| s.enabled)
-        .cloned()
-        .collect();
-    drop(config);
+    let servers: Vec<_> = {
+        let config = lock_config(&state.config);
+        config
+            .upstream
+            .iter()
+            .filter(|s| s.enabled)
+            .cloned()
+            .collect()
+    };
 
     let results = run_latency_test(&servers).await;
 
@@ -366,10 +384,14 @@ fn set_autostart(enabled: bool) -> Result<(), String> {
         let output = std::process::Command::new("schtasks")
             .args([
                 "/Create",
-                "/TN", "DNS Proxy",
-                "/TR", &task_command,
-                "/SC", "ONLOGON",
-                "/RL", "HIGHEST",
+                "/TN",
+                "DNS Proxy",
+                "/TR",
+                &task_command,
+                "/SC",
+                "ONLOGON",
+                "/RL",
+                "HIGHEST",
                 "/F",
             ])
             .output()
@@ -826,20 +848,20 @@ pub fn run() {
         .file
         .as_deref()
         .map(PathBuf::from)
-        .unwrap_or_else(|| log_dir.join("tun-diagnostics.log"));
+        .unwrap_or_else(|| log_dir.join("dns-proxy-diagnostics.log"));
     let log_file = if log_file.is_absolute() {
         log_file
     } else {
         log_dir.join(log_file)
     };
 
-    // 日志文件仅用于诊断，按天轮转，避免应用运行期间阻塞 TUN 启动。
+    // 日志文件仅用于诊断，按天轮转，避免应用运行期间阻塞启动。
     let _log_guard = match std::fs::create_dir_all(log_file.parent().unwrap_or(&log_dir)) {
         Ok(()) => {
             let file_name = log_file
                 .file_name()
                 .and_then(|name| name.to_str())
-                .unwrap_or("tun-diagnostics.log");
+                .unwrap_or("dns-proxy-diagnostics.log");
             let file_dir = log_file.parent().unwrap_or(&log_dir);
             let appender = tracing_appender::rolling::daily(file_dir, file_name);
             let (file_writer, guard) = tracing_appender::non_blocking(appender);
@@ -869,26 +891,26 @@ pub fn run() {
     };
 
     tracing::info!(path = %log_file.display(), "诊断日志已初始化");
-    let server = DnsServer::new(config.clone());
-    let tun_config = config.tun.clone();
-    let tun_device = TunDevice::new(tun_config.clone());
+
+    // 全进程只保留一份配置实例：服务器、处理器与界面状态共享同一个 Arc。
+    // 订阅规则动辄十几万条，多一份克隆就是十几 MB 常驻内存。
+    let shared_config = Arc::new(std::sync::Mutex::new(config.clone()));
+    let server = DnsServer::new(shared_config.clone());
 
     let latency_results = Arc::new(Mutex::new(Vec::new()));
     let latency_last_test = Arc::new(Mutex::new(None));
     let start_minimized = config.start_minimized;
 
-    // 如果 TUN 配置为启用，初始化时就设置启动中状态
-    let tun_starting = Arc::new(Mutex::new(tun_config.enabled));
-
     let state = AppState {
         server: Arc::new(Mutex::new(server)),
-        config: Arc::new(Mutex::new(config)),
-        tun_device: Arc::new(Mutex::new(tun_device)),
-        tun_config: Arc::new(Mutex::new(tun_config)),
-        tun_starting,
+        config: shared_config,
         latency_results: latency_results.clone(),
         latency_last_test: latency_last_test.clone(),
+        dns_snapshot: Arc::new(std::sync::Mutex::new(None)),
     };
+
+    // 上次异常退出可能把网卡 DNS 留在 127.0.0.1，先自愈再启动服务
+    system_dns::recover_pending();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -898,26 +920,20 @@ pub fn run() {
             let dns_status = MenuItemBuilder::with_id("dns_status", "DNS: 检查中...")
                 .enabled(false)
                 .build(app)?;
-            let tun_status = MenuItemBuilder::with_id("tun_status", "TUN: 检查中...")
-                .enabled(false)
-                .build(app)?;
             let latency_info = MenuItemBuilder::with_id("latency_info", "延迟: 未测试")
                 .enabled(false)
                 .build(app)?;
             let restart_dns =
                 MenuItemBuilder::with_id("restart_dns", "重启 DNS 服务").build(app)?;
-            let restart_tun = MenuItemBuilder::with_id("restart_tun", "重启 TUN").build(app)?;
             let test_latency = MenuItemBuilder::with_id("test_latency", "测试延迟").build(app)?;
             let show_window = MenuItemBuilder::with_id("show_window", "显示窗口").build(app)?;
             let quit = MenuItemBuilder::with_id("quit", "退出").build(app)?;
 
             let menu = MenuBuilder::new(app)
                 .item(&dns_status)
-                .item(&tun_status)
                 .item(&latency_info)
                 .separator()
                 .item(&restart_dns)
-                .item(&restart_tun)
                 .item(&test_latency)
                 .separator()
                 .item(&show_window)
@@ -943,23 +959,6 @@ pub fn run() {
                                 }
                             });
                         }
-                        "restart_tun" => {
-                            let state = app.state::<AppState>();
-                            let tun_device = state.tun_device.clone();
-                            let tun_config = state.tun_config.clone();
-                            tauri::async_runtime::spawn(async move {
-                                let mut tun = tun_device.lock().await;
-                                tun.stop().await;
-                                drop(tun);
-                                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                                let config = tun_config.lock().await.clone();
-                                let mut tun = tun_device.lock().await;
-                                *tun = TunDevice::new(config);
-                                if let Err(e) = tun.start().await {
-                                    tracing::error!("重启 TUN 失败: {}", e);
-                                }
-                            });
-                        }
                         "test_latency" => {
                             let state = app.state::<AppState>();
                             let config = state.config.clone();
@@ -967,7 +966,7 @@ pub fn run() {
                             let latency_last_test = state.latency_last_test.clone();
                             tauri::async_runtime::spawn(async move {
                                 let servers = {
-                                    let config = config.lock().await;
+                                    let config = lock_config(&config);
                                     config
                                         .upstream
                                         .iter()
@@ -1024,58 +1023,24 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 let state = app_handle_startup.state::<AppState>();
-                let mut server = state.server.lock().await;
-                if let Err(e) = server.start().await {
-                    tracing::error!("自动启动DNS服务失败: {}", e);
-                } else {
+
+                {
+                    let mut server = state.server.lock().await;
+                    if let Err(e) = server.start().await {
+                        tracing::error!("自动启动DNS服务失败: {}", e);
+                        return;
+                    }
                     tracing::info!("DNS服务已自动启动");
                 }
-            });
 
-            // 自动启动 TUN
-            let app_handle_tun = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                let tun_enabled = {
-                    let state = app_handle_tun.state::<AppState>();
-                    let config = state.config.lock().await;
-                    config.tun.enabled
-                };
-                if tun_enabled {
-                    // 等待 DNS 服务启动完成
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
-                    // 设置启动中状态
-                    {
-                        let state = app_handle_tun.state::<AppState>();
-                        let mut starting = state.tun_starting.lock().await;
-                        *starting = true;
-                    }
-
-                    let state = app_handle_tun.state::<AppState>();
-                    let tun_config = state.tun_config.lock().await.clone();
-
-                    let mut tun = state.tun_device.lock().await;
-                    *tun = TunDevice::new(tun_config);
-                    match tun.start().await {
-                        Ok(()) => {
-                            tracing::info!("TUN已自动启动");
-                            // 启动DNS拦截器
-                            let tun_clone = state.tun_device.clone();
-                            let server = state.server.lock().await;
-                            let handler = server.get_dns_handler();
-                            let interceptor = DnsInterceptor::new(tun_clone);
-                            interceptor.start(handler).await;
+                // 服务起来之后再把系统 DNS 指过来，顺序反了会有一段解析真空
+                let takeover = lock_config(&state.config).proxy.takeover_system_dns;
+                if takeover {
+                    match sync_dns_takeover(&state.dns_snapshot, true) {
+                        Ok(detail) => tracing::info!(detail = %detail, "系统 DNS 已接管"),
+                        Err(error) => {
+                            tracing::error!(%error, "接管系统 DNS 失败，本机解析仍走原 DNS")
                         }
-                        Err(e) => {
-                            tracing::error!("自动启动TUN失败: {}", e);
-                        }
-                    }
-
-                    // 清除启动中状态
-                    {
-                        let state = app_handle_tun.state::<AppState>();
-                        let mut starting = state.tun_starting.lock().await;
-                        *starting = false;
                     }
                 }
             });
@@ -1083,7 +1048,6 @@ pub fn run() {
             // 定期更新托盘菜单状态
             let app_handle = app.handle().clone();
             let dns_status_item = dns_status.clone();
-            let tun_status_item = tun_status.clone();
             let latency_info_item = latency_info.clone();
             tauri::async_runtime::spawn(async move {
                 loop {
@@ -1101,18 +1065,6 @@ pub fn run() {
                         "DNS: 已停止"
                     };
                     let _ = dns_status_item.set_text(dns_text);
-
-                    // 更新 TUN 状态
-                    let tun_running = {
-                        let tun = state.tun_device.lock().await;
-                        tun.is_running().await
-                    };
-                    let tun_text = if tun_running {
-                        "TUN: 运行中"
-                    } else {
-                        "TUN: 已停止"
-                    };
-                    let _ = tun_status_item.set_text(tun_text);
 
                     // 更新延迟信息
                     let latency_text = {
@@ -1141,10 +1093,11 @@ pub fn run() {
                 tokio::time::sleep(std::time::Duration::from_secs(10)).await;
 
                 loop {
+                    // 在块内取出副本再返回：守卫借用的是临时的 state，不能带出块外
                     let interval = {
                         let state = app_handle_auto.state::<AppState>();
-                        let config = state.config.lock().await;
-                        config.latency_test_interval
+                        let interval = lock_config(&state.config).latency_test_interval;
+                        interval
                     };
 
                     if interval == 0 {
@@ -1157,7 +1110,7 @@ pub fn run() {
                     {
                         let state = app_handle_auto.state::<AppState>();
                         let servers = {
-                            let config = state.config.lock().await;
+                            let config = lock_config(&state.config);
                             config
                                 .upstream
                                 .iter()
@@ -1186,10 +1139,7 @@ pub fn run() {
 
                 loop {
                     let state = app_handle_ip.state::<AppState>();
-                    let ecs_enabled = {
-                        let config = state.config.lock().await;
-                        config.ecs.enabled
-                    };
+                    let ecs_enabled = lock_config(&state.config).ecs.enabled;
 
                     if ecs_enabled {
                         // 获取 server 的 handler 来更新公网 IP
@@ -1221,17 +1171,15 @@ pub fn run() {
             get_server_status,
             get_stats,
             get_logs,
+            get_logs_since,
             clear_logs,
             clear_cache,
             update_subscriptions,
             get_traffic_stats,
             get_cache_stats,
             get_pool_stats,
-            get_tun_config,
-            save_tun_config,
-            start_tun,
-            stop_tun,
-            get_tun_status,
+            get_dns_takeover_status,
+            restore_system_dns,
             test_dns_latency,
             get_latency_results,
             check_update,
@@ -1240,6 +1188,18 @@ pub fn run() {
             is_autostart_enabled,
             set_autostart
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            // 任何退出路径都必须把系统 DNS 还回去：
+            // 进程没了而网卡还指向 127.0.0.1，整机域名解析会全部失效。
+            // 还原是幂等的（快照取出后即为 None），重复触发不会重复执行。
+            if matches!(
+                event,
+                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+            ) {
+                let state = app_handle.state::<AppState>();
+                release_dns_takeover(&state.dns_snapshot);
+            }
+        });
 }
