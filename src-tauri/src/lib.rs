@@ -214,7 +214,9 @@ async fn save_config(state: State<'_, AppState>, new_config: AppConfig) -> Resul
         config.save().map_err(|e| e.to_string())?;
     }
 
-    // 重启服务器以应用新配置，沿用同一个配置实例
+    // 重启服务器以应用新配置。配置已通过 Arc<Mutex<AppConfig>> 就地更新，
+    // 服务器与 DnsHandler 会直接读到新值，因此只停再起，不重建实例 ——
+    // 重建会构造全新的 DnsHandler，导致统计、日志等运行态数据全部归零。
     let was_running = {
         let mut server = state.server.lock().await;
         let was_running = server.is_running().await;
@@ -223,7 +225,6 @@ async fn save_config(state: State<'_, AppState>, new_config: AppConfig) -> Resul
             // 等待端口释放
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         }
-        *server = DnsServer::new(state.config.clone());
         if was_running {
             server.start().await.map_err(|e| e.to_string())?;
         }
