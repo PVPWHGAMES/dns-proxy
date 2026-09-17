@@ -5,8 +5,6 @@ import {
   ListFilter,
   FileText,
   Info,
-  Activity,
-  FlaskConical,
 } from "lucide-react";
 
 const navItems = [
@@ -31,20 +29,6 @@ const navItems = [
     path: "/logs",
   },
   {
-    title: "流量观察",
-    icon: Activity,
-    path: "/flows",
-    // 测试功能：WinDivert FLOW 层观察尚未在真实网络长期验证
-    badge: "测试",
-  },
-  {
-    title: "流量接管",
-    icon: FlaskConical,
-    path: "/redirect",
-    // 测试功能：会真实改写报文，仅在回环与虚拟对端验证过
-    badge: "测试",
-  },
-  {
     title: "关于",
     icon: Info,
     path: "/about",
@@ -64,7 +48,7 @@ export default function Sidebar() {
           </div>
           <div>
             <h1 className="font-bold text-lg">果冻网络加速</h1>
-            <p className="text-xs text-muted-foreground">v1.2.2</p>
+            <p className="text-xs text-muted-foreground">v1.2.3</p>
           </div>
         </div>
       </div>
@@ -90,20 +74,6 @@ export default function Sidebar() {
             >
               <Icon className="w-5 h-5" />
               <span className="font-medium">{item.title}</span>
-              {item.badge && (
-                <span
-                  className={`
-                    ml-auto text-[10px] font-medium px-1.5 py-0.5 rounded shrink-0
-                    ${
-                      isActive
-                        ? "bg-primary-foreground/20 text-primary-foreground"
-                        : "bg-amber-500/15 text-amber-600"
-                    }
-                  `}
-                >
-                  {item.badge}
-                </span>
-              )}
             </Link>
           );
         })}

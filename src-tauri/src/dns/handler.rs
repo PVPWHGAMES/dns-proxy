@@ -24,7 +24,10 @@ use trust_dns_proto::serialize::binary::{BinDecodable, BinEncodable};
 const GEOSITE_ROUTING_ENABLED: bool = crate::config::GEOSITE_ROUTING_ENABLED;
 
 /// 查询日志保留上限，超出后丢弃最旧记录
-const MAX_LOG_ENTRIES: usize = 1000;
+///
+/// 日志页按页翻查，缓冲区就是可翻的历史范围。单条日志约几百字节，
+/// 一万条的量级在 3MB 上下，对桌面程序可以接受；再往上就得落盘检索了。
+const MAX_LOG_ENTRIES: usize = 10000;
 
 /// 发往上游的查询统一声明的 EDNS0 载荷尺寸
 ///
@@ -201,6 +204,53 @@ pub struct TrafficStatsCollector {
     pub latency_buckets: [u64; 6], // 0-10, 10-50, 50-100, 100-200, 200-500, 500+
     // 启动时间
     pub start_time: Option<Instant>,
+}
+
+/// 查询日志的筛选条件
+///
+/// 过滤必须放在后端：分页总数要是「整段缓冲区里命中的条数」。
+/// 若只在前端过滤当前页，页数会按当前页的命中数算，翻页越翻越乱，
+/// 且明明存在的记录会因为不在当前页而搜不到。
+#[derive(Default, Clone)]
+pub struct LogFilter {
+    /// 域名关键字（大小写不敏感），空串表示不筛
+    pub keyword: String,
+    /// 查询状态，None 表示不筛
+    pub action: Option<String>,
+    /// 查询类型，None 表示不筛
+    pub query_type: Option<String>,
+}
+
+impl LogFilter {
+    fn matches(&self, log: &DnsQueryLog) -> bool {
+        if !self.keyword.is_empty() && !log.domain.to_lowercase().contains(&self.keyword) {
+            return false;
+        }
+        if let Some(action) = &self.action {
+            if log.action != *action {
+                return false;
+            }
+        }
+        if let Some(query_type) = &self.query_type {
+            if log.query_type != *query_type {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// 日志分页结果
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LogPage {
+    /// 命中筛选条件的总条数（按整段缓冲区统计）
+    pub total: usize,
+    /// 缓冲区当前保留的条数
+    pub retained: usize,
+    /// 缓冲区容量上限，即「最多保留最近多少条」
+    pub capacity: usize,
+    /// 当前页数据（新到旧）
+    pub logs: Vec<DnsQueryLog>,
 }
 
 impl DnsHandler {
@@ -630,7 +680,15 @@ impl DnsHandler {
                         return Some(response);
                     }
                     _ => {
-                        // 超时或领导者失败，向上返回 None
+                        // 超时或领导者失败，向上返回 None。
+                        // 这条查询同样是「收到了但没答复」，计入失败，
+                        // 否则并发等待超时的请求会完全不出现在统计与日志里。
+                        self.record_failure(
+                            &query_name,
+                            &format!("{:?}", query_type),
+                            "coalesced-timeout",
+                            start,
+                        );
                         return None;
                     }
                 }
@@ -699,9 +757,15 @@ impl DnsHandler {
 
         // 上游 DNS 全部失败时记录失败日志并返回 SERVFAIL 响应，
         // 避免上游不可用时让客户端一直等到超时。
-        if response.is_none() && !is_proxy_request {
+        //
+        // 代理请求（proxy 分组）不回 SERVFAIL，等代理软件自行处理；但它同样是一次
+        // 收到却没答复的查询，必须计入统计，否则「总查询数」会整类漏掉 ——
+        // 代理分组没有可用上游时尤其明显。
+        if response.is_none() {
             self.record_failure(&query_name, &format!("{:?}", query_type), "none", start);
-            return Some(self.create_servfail_response(&query));
+            if !is_proxy_request {
+                return Some(self.create_servfail_response(&query));
+            }
         }
 
         response
@@ -1438,6 +1502,33 @@ impl DnsHandler {
         fresh
     }
 
+    /// 按条件分页取日志（新到旧）
+    ///
+    /// 一次遍历同时得到「命中总数」和「当前页数据」：总数必须先于分页窗口统计，
+    /// 前端才能据它算出正确页数，翻到末页不会出现空白页。
+    pub fn get_logs_page(&self, offset: usize, limit: usize, filter: &LogFilter) -> LogPage {
+        let logs = self.logs.lock().unwrap();
+        let mut total = 0usize;
+        let mut page: Vec<DnsQueryLog> = Vec::new();
+
+        for log in logs.iter() {
+            if !filter.matches(log) {
+                continue;
+            }
+            if total >= offset && page.len() < limit {
+                page.push(log.clone());
+            }
+            total += 1;
+        }
+
+        LogPage {
+            total,
+            retained: logs.len(),
+            capacity: MAX_LOG_ENTRIES,
+            logs: page,
+        }
+    }
+
     pub fn get_stats(&self) -> (u64, u64, u64, f64) {
         let stats = self.stats.lock().unwrap();
         let avg_latency = if stats.total_queries > 0 {
@@ -1799,6 +1890,115 @@ mod tests {
         assert_eq!(handler.get_logs(10).len(), 10);
         // 请求条数超过实际条数时不应报错
         assert_eq!(handler.get_logs(1000).len(), 20);
+    }
+
+    /// 分页取日志：总数覆盖整段缓冲区，末页只剩余数条，翻页不重叠
+    #[test]
+    fn paged_logs_cover_the_whole_buffer() {
+        let handler = handler();
+        let start = Instant::now();
+        for index in 0..26 {
+            handler.record_cached(&format!("cache{}.example", index), "A", "1.2.3.4", start);
+        }
+
+        let first = handler.get_logs_page(0, 10, &LogFilter::default());
+        assert_eq!(first.total, 26, "总数必须是整段缓冲区里的条数");
+        assert_eq!(first.retained, 26);
+        assert_eq!(first.capacity, MAX_LOG_ENTRIES);
+        assert_eq!(first.logs.len(), 10);
+        // 日志按 id 降序存放：第 1 页首条是最新的那条
+        assert_eq!(first.logs[0].domain, "cache25.example");
+
+        let second = handler.get_logs_page(10, 10, &LogFilter::default());
+        assert_eq!(second.logs.len(), 10);
+        assert_eq!(
+            second.logs[0].id + 10,
+            first.logs[0].id,
+            "相邻页必须严格错开，不能重复同一条"
+        );
+
+        let last = handler.get_logs_page(20, 10, &LogFilter::default());
+        assert_eq!(last.logs.len(), 6, "末页只剩余数条");
+        // 越过末页时只返回空页，不应报错
+        assert!(handler
+            .get_logs_page(100, 10, &LogFilter::default())
+            .logs
+            .is_empty());
+    }
+
+    /// 筛选在后端做：总数是整段缓冲区里命中的条数，而不是当前页里的条数
+    #[test]
+    fn paged_logs_respect_filters() {
+        let handler = handler();
+        let start = Instant::now();
+        for index in 0..26 {
+            handler.record_cached(&format!("cache{}.example", index), "A", "1.2.3.4", start);
+        }
+        handler.record_blocked("ads.example", "A", "blocklist", start);
+
+        let by_action = handler.get_logs_page(
+            0,
+            10,
+            &LogFilter {
+                action: Some("blocked".to_string()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(by_action.total, 1, "命中数要按整段缓冲区统计");
+        assert_eq!(by_action.logs[0].domain, "ads.example");
+
+        // 关键字调用方统一转小写（命令层做），这里按小写匹配；
+        // cache1 命中 cache1 与 cache10..cache19
+        let by_keyword = handler.get_logs_page(
+            0,
+            5,
+            &LogFilter {
+                keyword: "cache1".to_string(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(by_keyword.total, 11);
+        assert_eq!(by_keyword.logs.len(), 5, "分页窗口仍然要生效");
+
+        let by_type = handler.get_logs_page(
+            0,
+            10,
+            &LogFilter {
+                query_type: Some("AAAA".to_string()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(by_type.total, 0);
+        assert!(by_type.logs.is_empty());
+    }
+
+    /// 代理分组的查询拿不到上游答复时也要计入统计
+    ///
+    /// 过去这条路径既不记失败也不记账（`!is_proxy_request` 直接把整条查询放过），
+    /// 于是代理分组没有可用上游期间，仪表盘的「总查询数」会停着不动。
+    #[tokio::test]
+    async fn proxy_request_without_answer_is_counted_as_failure() {
+        let mut config = AppConfig::default();
+        // 默认分组设为 proxy，即可让它被判为「代理请求」；
+        // 上游清空，让转发立刻返回「没有可用服务器」，测试不碰真实网络
+        config.proxy.default_group = "proxy".to_string();
+        config.upstream.clear();
+        let handler = DnsHandler::new(
+            Arc::new(Mutex::new(config)),
+            Arc::new(DnsCache::new(16, Duration::from_secs(300))),
+        );
+
+        let query = build_query("proxy.example.com", RecordType::A)
+            .to_bytes()
+            .unwrap();
+        // 代理请求失败时不回 SERVFAIL（交给代理软件），但仍要留痕
+        assert!(handler.handle_query(&query).await.is_none());
+
+        let (total, _, _, _) = handler.get_stats();
+        assert_eq!(total, 1, "代理请求失败必须计入总查询数");
+        let logs = handler.get_logs_since(0);
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].action, "failed");
     }
 
     #[test]

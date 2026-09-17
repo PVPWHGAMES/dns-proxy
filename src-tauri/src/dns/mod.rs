@@ -31,7 +31,7 @@ pub struct DnsStats {
 }
 
 // 重新导出流量统计类型
-pub use handler::{DomainStat, LatencyDistribution, TimeBucket, TrafficStats};
+pub use handler::{DomainStat, LatencyDistribution, LogFilter, LogPage, TimeBucket, TrafficStats};
 
 // 重新导出缓存统计类型
 pub use cache::CacheStats;

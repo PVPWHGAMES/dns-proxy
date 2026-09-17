@@ -93,10 +93,13 @@ fn query_server(server: SocketAddr, request: &[u8], timeout: Duration) -> Option
     let (length, _) = socket.recv_from(&mut buffer).ok()?;
     let response = Message::from_bytes(&buffer[..length]).ok()?;
 
-    response.answers().iter().find_map(|record| match record.data() {
-        Some(RData::A(address)) => Some(address.0),
-        _ => None,
-    })
+    response
+        .answers()
+        .iter()
+        .find_map(|record| match record.data() {
+            Some(RData::A(address)) => Some(address.0),
+            _ => None,
+        })
 }
 
 #[cfg(test)]
@@ -144,9 +147,11 @@ mod tests {
                     .set_recursion_available(true);
                 for query in request.queries() {
                     response.add_query(query.clone());
-                    response.add_answer(
-                        Record::from_rdata(query.name().clone(), 60, RData::A(A(address))),
-                    );
+                    response.add_answer(Record::from_rdata(
+                        query.name().clone(),
+                        60,
+                        RData::A(A(address)),
+                    ));
                 }
                 if let Ok(bytes) = response.to_bytes() {
                     let _ = socket.send_to(&bytes, peer);

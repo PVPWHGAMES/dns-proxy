@@ -1,6 +1,6 @@
 use crate::config::AppConfig;
 use crate::dns::cache::{CacheStats, DnsCache};
-use crate::dns::handler::{DnsHandler, TrafficStats};
+use crate::dns::handler::{DnsHandler, LogFilter, LogPage, TrafficStats};
 use crate::dns::DnsQueryLog;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
@@ -530,6 +530,11 @@ impl DnsServer {
     /// 取 id 大于 since_id 的新查询日志
     pub fn get_logs_since(&self, since_id: u64) -> Vec<DnsQueryLog> {
         self.handler.get_logs_since(since_id)
+    }
+
+    /// 按条件分页取查询日志
+    pub fn get_logs_page(&self, offset: usize, limit: usize, filter: &LogFilter) -> LogPage {
+        self.handler.get_logs_page(offset, limit, filter)
     }
 
     pub fn get_stats(&self) -> (u64, u64, u64, f64) {

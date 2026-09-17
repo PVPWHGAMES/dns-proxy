@@ -32,6 +32,18 @@ pub struct AdapterDns {
     pub v6: Vec<String>,
 }
 
+impl AdapterDns {
+    /// 网卡当前 DNS 是否指向本机代理
+    ///
+    /// 快照存的是「原始配置」，一旦把 127.0.0.1 / ::1 当成原始值存进去，
+    /// 之后还原也只会把本机代理地址写回网卡，整机解析再也回不来，
+    /// 所以采集阶段必须先识别出这种残留接管。
+    fn points_at_local_proxy(&self) -> bool {
+        self.v4.iter().flatten().any(|server| server == LOCAL_V4)
+            || self.v6.iter().any(|server| server == LOCAL_V6)
+    }
+}
+
 /// 一次接管前的系统 DNS 快照
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DnsSnapshot {
@@ -198,6 +210,22 @@ Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object {{ $_.Status -eq 'Up
             },
             v6: split_servers(v6_raw),
         });
+    }
+
+    // 残留接管必须先拦下来：此时网卡 DNS 已经是本机代理地址，
+    // 若继续接管，快照会把 127.0.0.1 记成「原始配置」并覆盖掉上一份待还原记录，
+    // 于是原始 DNS 彻底丢失，之后每次还原都只能还原成 127.0.0.1。
+    let residual: Vec<&str> = adapters
+        .iter()
+        .filter(|adapter| adapter.points_at_local_proxy())
+        .map(|adapter| adapter.alias.as_str())
+        .collect();
+    if !residual.is_empty() {
+        return Err(format!(
+            "网卡 {} 的 DNS 仍指向本机代理，说明上次接管没有还原；已中止本次接管，避免把 {} 当成原始配置存下来。请先还原这些网卡的 DNS（重启程序会自动重试）",
+            residual.join("、"),
+            LOCAL_V4
+        ));
     }
 
     info!(
@@ -383,9 +411,10 @@ pub fn clear_pending() {
 /// 启动时自愈：上次异常退出留下的快照先还原掉
 ///
 /// 否则网卡 DNS 会一直停在 127.0.0.1，而代理进程已经不在，整机解析全废。
-pub fn recover_pending() {
+/// 还原失败时保留快照并返回错误，由调用方决定是否继续接管。
+pub fn recover_pending() -> Result<(), String> {
     let Some(snapshot) = load_pending() else {
-        return;
+        return Ok(());
     };
 
     warn!(
@@ -398,8 +427,12 @@ pub fn recover_pending() {
         Ok(()) => {
             clear_pending();
             info!("上次的 DNS 接管已恢复");
+            Ok(())
         }
-        Err(error) => warn!(%error, "恢复上次 DNS 接管失败，将保留快照以便重试"),
+        Err(error) => {
+            warn!(%error, "恢复上次 DNS 接管失败，将保留快照以便重试");
+            Err(error)
+        }
     }
 }
 
@@ -492,5 +525,49 @@ mod tests {
             "自动获取必须落成 null，还原时才知道该重置而不是写空地址: {}",
             json
         );
+    }
+
+    /// 采集到本机代理地址必须判定为残留接管：否则它会被当成原始配置存下来，
+    /// 之后的还原只会把 127.0.0.1 写回网卡
+    #[test]
+    fn adapter_pointing_at_local_proxy_is_detected() {
+        let stale_v4 = AdapterDns {
+            if_index: 4,
+            alias: "以太网 2".to_string(),
+            v4: Some(vec!["127.0.0.1".to_string()]),
+            v6: Vec::new(),
+        };
+        assert!(
+            stale_v4.points_at_local_proxy(),
+            "IPv4 指向代理应判定为残留"
+        );
+
+        let stale_v6 = AdapterDns {
+            if_index: 20,
+            alias: "vEthernet (vlan_lan)".to_string(),
+            v4: None,
+            v6: vec!["::1".to_string()],
+        };
+        assert!(
+            stale_v6.points_at_local_proxy(),
+            "IPv6 指向代理应判定为残留"
+        );
+
+        // 混在正常地址里也算残留，否则漏判一次就丢掉原始配置
+        let mixed = AdapterDns {
+            if_index: 32,
+            alias: "vEthernet (vlan_wan)".to_string(),
+            v4: Some(vec!["223.5.5.5".to_string(), "127.0.0.1".to_string()]),
+            v6: Vec::new(),
+        };
+        assert!(mixed.points_at_local_proxy(), "含代理地址即应判定为残留");
+
+        let clean = AdapterDns {
+            if_index: 32,
+            alias: "vEthernet (vlan_wan)".to_string(),
+            v4: Some(vec!["223.5.5.5".to_string(), "202.103.224.68".to_string()]),
+            v6: vec!["fec0:0:0:ffff::1".to_string()],
+        };
+        assert!(!clean.points_at_local_proxy(), "正常配置不应误判");
     }
 }

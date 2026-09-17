@@ -358,11 +358,41 @@ export default function Dashboard() {
 
       {/* 统计卡片 */}
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
-        <StatCard title="总查询数" value={stats.total_queries.toLocaleString()} icon={Activity} color="blue" />
-        <StatCard title="阻止查询" value={stats.blocked_queries.toLocaleString()} icon={Shield} color="red" />
-        <StatCard title="平均延迟" value={`${stats.avg_latency.toFixed(1)}ms`} icon={Zap} color="yellow" />
-        <StatCard title="缓存命中" value={stats.cached_queries.toLocaleString()} icon={Server} color="green" />
-        <StatCard title="当前 QPS" value={currentQps.toFixed(2)} icon={TrendingUp} color="orange" />
+        <StatCard
+          title="总查询数（本次运行）"
+          value={stats.total_queries.toLocaleString()}
+          icon={Activity}
+          color="blue"
+          hint="计数保存在内存里，进程重启后归零；每条查询只计一次，含缓存命中、阻止、请求合并与失败。日志页的「共 N 条」是另一回事——那是可翻查的日志缓冲区条数，与这里的累计值不相等。"
+        />
+        <StatCard
+          title="阻止查询"
+          value={stats.blocked_queries.toLocaleString()}
+          icon={Shield}
+          color="red"
+          hint="命中自定义规则、订阅黑名单或 IPv6 屏蔽而返回黑洞/NXDOMAIN 的查询数，已包含在总查询数里。"
+        />
+        <StatCard
+          title="平均延迟"
+          value={`${stats.avg_latency.toFixed(1)}ms`}
+          icon={Zap}
+          color="yellow"
+          hint="分子只累加成功转向上游的查询耗时，分母是总查询数（含缓存命中、阻止等不计耗时的路径），因此数值偏低，可视为上游响应速度的下界。"
+        />
+        <StatCard
+          title="缓存命中"
+          value={stats.cached_queries.toLocaleString()}
+          icon={Server}
+          color="green"
+          hint="命中 DNS 应答缓存而直接回包的查询数；代理分组（proxy）的请求按设计不读缓存，故不计入分母。"
+        />
+        <StatCard
+          title="当前 QPS"
+          value={currentQps.toFixed(2)}
+          icon={TrendingUp}
+          color="orange"
+          hint="取最近一个已完成的整分钟均值（该分钟查询数 ÷ 60），比「运行至今的平均 QPS」更能反映此刻的负载。"
+        />
         <StatCard
           title="内存(总工作集)"
           value={memory ? `${memory.memory_mb.toFixed(0)} MB` : "-"}
