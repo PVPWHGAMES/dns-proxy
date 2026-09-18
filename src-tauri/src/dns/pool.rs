@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::{TcpStream, UdpSocket};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{oneshot, watch, Mutex};
 use tokio_rustls::TlsConnector;
 use tracing::{debug, info, warn};
 
@@ -53,6 +53,8 @@ struct UdpChannel {
     alive: Arc<AtomicBool>,
     /// 最后一次使用时间，用于空闲释放
     last_used: std::sync::Mutex<Instant>,
+    /// 通知后台接收任务退出；通道被逐出连接池时必须显式关闭 socket。
+    shutdown: watch::Sender<bool>,
 }
 
 impl DnsConnectionPool {
@@ -91,7 +93,9 @@ impl DnsConnectionPool {
                 Some(channel) if channel.is_alive() => return Some(channel.clone()),
                 Some(_) => {
                     debug!("[连接池] UDP 通道已失效，丢弃重建: {}", addr);
-                    channels.remove(addr);
+                    if let Some(channel) = channels.remove(addr) {
+                        channel.shutdown();
+                    }
                 }
                 None => {}
             }
@@ -107,12 +111,22 @@ impl DnsConnectionPool {
 
     /// 剔除指定 UDP 通道（仅当池中仍是同一个通道实例时才移除）
     fn remove_udp_channel(&self, addr: &str, channel: &Arc<UdpChannel>) {
-        let mut channels = self.udp_channels.lock().unwrap();
-        if let Some(current) = channels.get(addr) {
-            if Arc::ptr_eq(current, channel) {
-                channels.remove(addr);
-                debug!("[连接池] UDP 通道已剔除: {}", addr);
+        let removed = {
+            let mut channels = self.udp_channels.lock().unwrap();
+            if let Some(current) = channels.get(addr) {
+                if Arc::ptr_eq(current, channel) {
+                    channels.remove(addr)
+                } else {
+                    None
+                }
+            } else {
+                None
             }
+        };
+
+        if let Some(channel) = removed {
+            channel.shutdown();
+            debug!("[连接池] UDP 通道已剔除并关闭: {}", addr);
         }
     }
 
@@ -257,19 +271,46 @@ impl DnsConnectionPool {
     /// 失效通道（接收任务退出）不解引用会让后续查询全部超时并堆积等待者，
     /// 因此这里同时兜底剔除，正常路径由查询失败时即时剔除。
     fn cleanup_idle_udp(&self) {
-        let mut channels = self.udp_channels.lock().unwrap();
-        let before = channels.len();
-        channels.retain(|addr, channel| {
-            let keep = channel.is_alive() && channel.idle_for() < UDP_CHANNEL_IDLE_TIMEOUT;
-            if !keep {
-                debug!("[连接池] 释放失效或空闲 UDP 通道: {}", addr);
-            }
-            keep
-        });
-        let removed = before - channels.len();
-        if removed > 0 {
-            info!("[连接池] 清理了 {} 个 UDP 通道", removed);
+        // 仅从 Map 移除 Arc 不会终止 recv 任务；先取出通道，再发关闭信号，
+        // 才能同时回收 socket、后台任务和仍在等待的查询。
+        let removed: Vec<(String, Arc<UdpChannel>)> = {
+            let mut channels = self.udp_channels.lock().unwrap();
+            let stale_addrs: Vec<String> = channels
+                .iter()
+                .filter_map(|(addr, channel)| {
+                    let keep = channel.is_alive() && channel.idle_for() < UDP_CHANNEL_IDLE_TIMEOUT;
+                    (!keep).then(|| addr.clone())
+                })
+                .collect();
+
+            stale_addrs
+                .into_iter()
+                .filter_map(|addr| channels.remove(&addr).map(|channel| (addr, channel)))
+                .collect()
+        };
+
+        for (addr, channel) in &removed {
+            channel.shutdown();
+            debug!("[连接池] 释放失效或空闲 UDP 通道: {}", addr);
         }
+        if !removed.is_empty() {
+            info!("[连接池] 清理了 {} 个 UDP 通道", removed.len());
+        }
+    }
+
+    /// 关闭全部 UDP 通道与 DoT 空闲连接，供 DNS 服务停止或定时重启时释放运行态。
+    pub fn shutdown(&self) {
+        let channels: Vec<Arc<UdpChannel>> = self
+            .udp_channels
+            .lock()
+            .unwrap()
+            .drain()
+            .map(|(_, channel)| channel)
+            .collect();
+        for channel in channels {
+            channel.shutdown();
+        }
+        self.dot_pools.lock().unwrap().clear();
     }
 
     /// 获取池统计信息
@@ -336,6 +377,7 @@ impl UdpChannel {
         let pending: Arc<Mutex<HashMap<u16, oneshot::Sender<Vec<u8>>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let alive = Arc::new(AtomicBool::new(true));
+        let (shutdown, mut shutdown_rx) = watch::channel(false);
 
         let channel = Self {
             socket: Arc::new(socket),
@@ -343,41 +385,51 @@ impl UdpChannel {
             next_id: Arc::new(Mutex::new(1)),
             alive: alive.clone(),
             last_used: std::sync::Mutex::new(Instant::now()),
+            shutdown,
         };
 
-        // 启动后台接收任务：持续读取 DNS 响应，按 ID 分发给等待者
+        // 启动后台接收任务：持续读取 DNS 响应，按 ID 分发给等待者。
+        // 清理通道时用 watch 中断 recv，避免后台任务继续持有 socket 导致句柄泄漏。
         let socket_recv = channel.socket.clone();
         let addr_owned = addr.to_string();
         tokio::spawn(async move {
             let mut buf = vec![0u8; 4096];
             loop {
-                match socket_recv.recv(&mut buf).await {
-                    Ok(len) if len >= 2 => {
-                        let dns_id = u16::from_be_bytes([buf[0], buf[1]]);
-                        let mut map = pending.lock().await;
-                        if let Some(sender) = map.remove(&dns_id) {
-                            // 发送者可能已超时取消，忽略错误
-                            let _ = sender.send(buf[..len].to_vec());
+                tokio::select! {
+                    _ = shutdown_rx.changed() => break,
+                    result = socket_recv.recv(&mut buf) => match result {
+                        Ok(len) if len >= 2 => {
+                            let dns_id = u16::from_be_bytes([buf[0], buf[1]]);
+                            let mut map = pending.lock().await;
+                            if let Some(sender) = map.remove(&dns_id) {
+                                // 发送者可能已超时取消，忽略错误
+                                let _ = sender.send(buf[..len].to_vec());
+                            }
+                            // 无人等待此 ID 的响应（可能已超时），丢弃
                         }
-                        // 无人等待此 ID 的响应（可能已超时），丢弃
-                    }
-                    Ok(_) => {
-                        // 包太短，忽略
-                    }
-                    Err(e) => {
-                        // 接收任务退出后通道不再可用：标记失效并立刻唤醒等待者，
-                        // 避免它们白等到超时；下次查询会剔除本通道并重建
-                        alive.store(false, Ordering::Relaxed);
-                        pending.lock().await.clear();
-                        warn!("[连接池] UDP 接收任务退出 {}: {}", addr_owned, e);
-                        break;
+                        Ok(_) => {
+                            // 包太短，忽略
+                        }
+                        Err(e) => {
+                            warn!("[连接池] UDP 接收任务退出 {}: {}", addr_owned, e);
+                            break;
+                        }
                     }
                 }
             }
+            alive.store(false, Ordering::Relaxed);
+            // 丢弃 sender 会立即唤醒所有等待者，避免它们仍白等到超时。
+            pending.lock().await.clear();
         });
 
         debug!("[连接池] UDP 通道已建立: {}", addr);
         Some(channel)
+    }
+
+    /// 请求后台接收任务退出，并让所有等待中的查询立即失败。
+    fn shutdown(&self) {
+        self.alive.store(false, Ordering::Relaxed);
+        let _ = self.shutdown.send(true);
     }
 
     /// 接收任务是否仍在运行

@@ -54,10 +54,57 @@
   * {
     @apply border-border;
   }
+  html,
+  body,
+  #root {
+    @apply w-full h-full overflow-hidden;
+  }
   body {
     @apply bg-background text-foreground;
   }
 }
+
+/* 无系统装饰窗口的标题栏：只允许中间空白区域拖拽，避免控制按钮吞掉点击。 */
+.titlebar [data-tauri-drag-region] {
+  app-region: drag;
+  -webkit-app-region: drag;
+}
+
+.titlebar .window-controls,
+.titlebar button {
+  app-region: no-drag;
+  -webkit-app-region: no-drag;
+}
+
+.window-control {
+  width: 46px;
+  color: hsl(var(--muted-foreground));
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.window-control:hover {
+  background: hsl(var(--accent));
+  color: hsl(var(--foreground));
+}
+
+.window-control:active {
+  background: hsl(var(--muted));
+}
+
+.window-control-close:hover,
+.window-control-close:active {
+  background: #c42b1c;
+  color: #ffffff;
+}
+
+.window-control:focus-visible {
+  outline: 2px solid hsl(var(--ring));
+  outline-offset: -3px;
+}
+
 
 /* 自定义滚动条 */
 ::-webkit-scrollbar {

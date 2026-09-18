@@ -330,13 +330,13 @@ export default function Settings() {
                 onChange={(e) =>
                   setConfig({
                     ...config,
-                    proxy: { ...config.proxy, cache_ttl: parseInt(e.target.value) || 300 },
+                    proxy: { ...config.proxy, cache_ttl: Math.max(0, parseInt(e.target.value) || 0) },
                   })
                 }
                 className="w-full px-3 py-2 border rounded-lg bg-background"
               />
               <p className="text-xs text-muted-foreground mt-1">
-                实际缓存时间取记录自身 TTL 与此上限的较小值，命中时按驻留时间递减
+                使用果冻解析时建议填 0，直接使用权威服务器返回的原始 TTL；填写其他数值时，缓存 TTL 将受此上限限制。命中缓存后 TTL 会按驻留时间递减
               </p>
             </div>
           </div>
@@ -402,49 +402,23 @@ export default function Settings() {
             </div>
           </div>
 
-          <div className="space-y-3">
-            <label className="flex items-center gap-3 cursor-pointer" onClick={handleToggleAutostart}>
-              <input
-                type="checkbox"
-                checked={autostartEnabled}
-                onChange={handleToggleAutostart}
-                className="w-4 h-4"
-              />
-              <div>
-                <p className="text-sm font-medium">开机自启动</p>
-                <p className="text-xs text-muted-foreground">Windows 启动时自动运行果冻网络加速</p>
-              </div>
-            </label>
-            <label className="flex items-center gap-3 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={config.start_minimized}
-                onChange={(e) => setConfig({ ...config, start_minimized: e.target.checked })}
-                className="w-4 h-4"
-              />
-              <div>
-                <p className="text-sm font-medium">启动后最小化</p>
-                <p className="text-xs text-muted-foreground">启动后隐藏到系统托盘，可通过托盘恢复窗口</p>
-              </div>
-            </label>
-            <label className="flex items-center gap-3 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={config.proxy.block_ipv6}
-                onChange={(e) =>
-                  setConfig({
-                    ...config,
-                    proxy: { ...config.proxy, block_ipv6: e.target.checked },
-                  })
-                }
-                className="w-4 h-4"
-              />
-              <div>
-                <p className="text-sm font-medium">阻止 IPv6 查询</p>
-                <p className="text-xs text-muted-foreground">屏蔽所有 AAAA 记录</p>
-              </div>
-            </label>
-          </div>
+          <label className="flex items-center gap-3 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={config.proxy.block_ipv6}
+              onChange={(e) =>
+                setConfig({
+                  ...config,
+                  proxy: { ...config.proxy, block_ipv6: e.target.checked },
+                })
+              }
+              className="w-4 h-4"
+            />
+            <div>
+              <p className="text-sm font-medium">阻止 IPv6 查询</p>
+              <p className="text-xs text-muted-foreground">屏蔽所有 AAAA 记录</p>
+            </div>
+          </label>
 
           {/* ECS 配置 */}
           <div className="space-y-3 pt-3 border-t">

@@ -2,6 +2,7 @@ import { BrowserRouter as Router, Routes, Route } from "react-router-dom";
 import Layout from "./components/Layout";
 import Dashboard from "./pages/Dashboard";
 import Settings from "./pages/Settings";
+import AppSettings from "./pages/AppSettings";
 import Rules from "./pages/Rules";
 import Logs from "./pages/Logs";
 
@@ -14,7 +15,7 @@ function App() {
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/settings" element={<Settings />} />
-
+          <Route path="/app-settings" element={<AppSettings />} />
           <Route path="/rules" element={<Rules />} />
           <Route path="/logs" element={<Logs />} />
           <Route path="/about" element={<About />} />

@@ -5,6 +5,7 @@ import { Moon, Sun } from "lucide-react";
 const pageTitles: Record<string, string> = {
   "/": "仪表盘",
   "/settings": "DNS 设置",
+  "/app-settings": "应用设置",
   "/rules": "规则管理",
   "/logs": "日志查看",
   "/network": "网络设置",

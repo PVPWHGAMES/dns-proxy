@@ -127,6 +127,23 @@ fn release_dns_takeover(slot: &std::sync::Mutex<Option<DnsSnapshot>>) {
     }
 }
 
+/// 完整重启 DNS 服务：先还原系统 DNS，再释放服务运行态，启动成功后重新接管。
+async fn restart_dns_service(state: &AppState) -> Result<(), String> {
+    release_dns_takeover(&state.dns_snapshot);
+
+    {
+        let mut server = state.server.lock().await;
+        server.stop().await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        server.start().await.map_err(|error| error.to_string())?;
+    }
+
+    if lock_config(&state.config).proxy.takeover_system_dns {
+        sync_dns_takeover(&state.dns_snapshot, true)?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 async fn get_config(state: State<'_, AppState>) -> Result<AppConfig, String> {
     let config = lock_config(&state.config);
@@ -169,6 +186,19 @@ async fn save_config(state: State<'_, AppState>, new_config: AppConfig) -> Resul
     }
 
     Ok(())
+}
+
+/// 仅保存桌面应用自身行为，不重启 DNS 服务。
+#[tauri::command]
+async fn save_app_settings(
+    state: State<'_, AppState>,
+    new_config: AppConfig,
+) -> Result<(), String> {
+    let mut config = lock_config(&state.config);
+    config.start_minimized = new_config.start_minimized;
+    config.startup_delay_seconds = new_config.startup_delay_seconds;
+    config.dns_restart_interval_hours = new_config.dns_restart_interval_hours;
+    config.save().map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -952,6 +982,7 @@ pub fn run() {
     let latency_results = Arc::new(Mutex::new(Vec::new()));
     let latency_last_test = Arc::new(Mutex::new(None));
     let start_minimized = config.start_minimized;
+    let startup_delay_seconds = config.startup_delay_seconds;
 
     let state = AppState {
         server: Arc::new(Mutex::new(server)),
@@ -1073,10 +1104,16 @@ pub fn run() {
                 }
             }
 
-            // 自动启动 DNS 服务（应用启动时始终启动）
+            // 自动启动 DNS 服务：可选等待系统网络与代理组件就绪，避免登录瞬间抢占 DNS。
             let app_handle_startup = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                let delay = std::time::Duration::from_secs(startup_delay_seconds);
+                if !delay.is_zero() {
+                    tracing::info!(seconds = startup_delay_seconds, "延迟启动 DNS 服务");
+                    tokio::time::sleep(delay).await;
+                } else {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
                 let state = app_handle_startup.state::<AppState>();
 
                 {
@@ -1096,6 +1133,36 @@ pub fn run() {
                         Err(error) => {
                             tracing::error!(%error, "接管系统 DNS 失败，本机解析仍走原 DNS")
                         }
+                    }
+                }
+            });
+
+            // 定时重启 DNS 服务：只重启代理服务，不退出桌面应用。
+            // 每轮读取配置，用户保存新间隔后无需重启整个应用即可生效。
+            let app_handle_restart = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    let interval_hours = {
+                        let state = app_handle_restart.state::<AppState>();
+                        let interval = lock_config(&state.config).dns_restart_interval_hours;
+                        interval
+                    };
+                    if interval_hours == 0 {
+                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                        continue;
+                    }
+
+                    tokio::time::sleep(std::time::Duration::from_secs(interval_hours * 60 * 60))
+                        .await;
+                    let state = app_handle_restart.state::<AppState>();
+                    // 配置可能在等待期被关闭或修改，重新读取后再决定是否执行。
+                    if lock_config(&state.config).dns_restart_interval_hours != interval_hours {
+                        continue;
+                    }
+                    tracing::info!(hours = interval_hours, "执行定时 DNS 服务重启");
+                    match restart_dns_service(state.inner()).await {
+                        Ok(()) => tracing::info!("定时 DNS 服务重启完成"),
+                        Err(error) => tracing::error!(%error, "定时 DNS 服务重启失败"),
                     }
                 }
             });
@@ -1221,6 +1288,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_config,
             save_config,
+            save_app_settings,
             start_server,
             stop_server,
             get_server_status,

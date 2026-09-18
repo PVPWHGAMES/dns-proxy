@@ -76,6 +76,10 @@ export interface AppConfig {
   subscription_update_interval: number;
   latency_test_interval: number;
   start_minimized: boolean;
+  /** 登录后延迟启动 DNS 服务的秒数，0 表示立即启动 */
+  startup_delay_seconds: number;
+  /** DNS 服务定时重启间隔（小时），0 表示禁用 */
+  dns_restart_interval_hours: number;
   log: LogConfig;
   strategy: DnsStrategy;
   server_groups: ServerGroup[];
@@ -193,6 +197,10 @@ export const api = {
 
   async saveConfig(config: AppConfig): Promise<void> {
     return await invoke("save_config", { newConfig: config });
+  },
+
+  async saveAppSettings(config: AppConfig): Promise<void> {
+    return await invoke("save_app_settings", { newConfig: config });
   },
 
   async startServer(): Promise<void> {

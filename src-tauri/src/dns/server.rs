@@ -7,7 +7,7 @@ use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{watch, Mutex, Semaphore};
 use tracing::{debug, error, info, warn};
 use trust_dns_proto::op::{Message, MessageType};
 use trust_dns_proto::serialize::binary::{BinDecodable, BinEncodable};
@@ -26,6 +26,8 @@ const QUERY_BUFFER_SIZE: usize = 4096;
 const TCP_MAX_MESSAGE_SIZE: usize = 65535;
 /// 单条 TCP 连接空闲多久后回收
 const TCP_CONNECTION_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// 同时处理的本地 DNS 请求上限；上游不可用时避免无限创建等待任务。
+const MAX_INFLIGHT_QUERIES: usize = 512;
 
 /// 监听传输协议
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +91,8 @@ pub struct DnsServer {
     listen_addr: String,
     transport: String,
     update_interval_minutes: u64,
+    /// 本地请求的并发闸门，保证上游卡住时任务数量仍有上限。
+    query_permits: Arc<Semaphore>,
 }
 
 impl DnsServer {
@@ -127,6 +131,7 @@ impl DnsServer {
             listen_addr,
             transport,
             update_interval_minutes,
+            query_permits: Arc::new(Semaphore::new(MAX_INFLIGHT_QUERIES)),
         }
     }
 
@@ -223,7 +228,7 @@ impl DnsServer {
 
         // 每个监听地址一个 UDP 接收循环
         for socket in self.sockets.clone() {
-            self.spawn_udp_loop(socket, shutdown_rx.clone());
+            self.spawn_udp_loop(socket, shutdown_rx.clone(), self.query_permits.clone());
         }
 
         // 每个监听地址一个 TCP accept 循环
@@ -239,22 +244,21 @@ impl DnsServer {
         // 启动定时更新订阅
         if self.update_interval_minutes > 0 {
             let handler_timer = self.handler.clone();
-            let running_timer = self.running.clone();
             let interval_minutes = self.update_interval_minutes;
+            let mut shutdown_timer = shutdown_rx.clone();
 
             tokio::spawn(async move {
                 let interval = std::time::Duration::from_secs(interval_minutes * 60);
                 info!("定时更新订阅已启用，间隔: {} 分钟", interval_minutes);
 
                 loop {
-                    tokio::time::sleep(interval).await;
-
-                    if !*running_timer.lock().await {
-                        break;
+                    tokio::select! {
+                        _ = shutdown_timer.changed() => break,
+                        _ = tokio::time::sleep(interval) => {
+                            info!("定时更新订阅...");
+                            handler_timer.update_subscriptions().await;
+                        }
                     }
-
-                    info!("定时更新订阅...");
-                    handler_timer.update_subscriptions().await;
                 }
             });
         }
@@ -262,21 +266,20 @@ impl DnsServer {
         // 启动定期连接池维护（每 60 秒清理过期连接和缓存）
         {
             let handler_maint = self.handler.clone();
-            let running_maint = self.running.clone();
+            let mut shutdown_maint = shutdown_rx.clone();
 
             tokio::spawn(async move {
                 let interval = std::time::Duration::from_secs(60);
                 info!("连接池定期维护已启用，间隔: 60 秒");
 
                 loop {
-                    tokio::time::sleep(interval).await;
-
-                    if !*running_maint.lock().await {
-                        break;
+                    tokio::select! {
+                        _ = shutdown_maint.changed() => break,
+                        _ = tokio::time::sleep(interval) => {
+                            handler_maint.cleanup_expired_cache();
+                            handler_maint.cleanup_idle_connections();
+                        }
                     }
-
-                    handler_maint.cleanup_expired_cache();
-                    handler_maint.cleanup_idle_connections();
                 }
             });
         }
@@ -285,7 +288,12 @@ impl DnsServer {
     }
 
     /// 启动单个 UDP 监听循环
-    fn spawn_udp_loop(&self, socket: Arc<UdpSocket>, mut shutdown_rx: watch::Receiver<bool>) {
+    fn spawn_udp_loop(
+        &self,
+        socket: Arc<UdpSocket>,
+        mut shutdown_rx: watch::Receiver<bool>,
+        query_permits: Arc<Semaphore>,
+    ) {
         let handler = self.handler.clone();
         let running_flag = self.running.clone();
 
@@ -319,11 +327,17 @@ impl DnsServer {
                     }
                 };
 
+                let Ok(permit) = query_permits.clone().try_acquire_owned() else {
+                    // 上游阻塞时宁可快速失败，也不能无限 spawn 把运行时和网络栈拖垮。
+                    debug!("DNS 查询并发达到上限，丢弃来自 {} 的请求", src_addr);
+                    continue;
+                };
                 let query_bytes = buf[..len].to_vec();
                 let handler = handler.clone();
                 let socket = socket.clone();
 
                 tokio::spawn(async move {
+                    let _permit = permit;
                     let Some(response) = handler.handle_query(&query_bytes).await else {
                         return;
                     };
@@ -385,7 +399,8 @@ impl DnsServer {
         drop(running);
 
         self.release_listeners();
-        info!("DNS服务器已停止");
+        self.handler.shutdown().await;
+        info!("DNS服务器已停止并释放运行态");
     }
 
     /// 不检查运行状态，直接置位并释放监听资源
@@ -394,6 +409,7 @@ impl DnsServer {
         *running = false;
         drop(running);
         self.release_listeners();
+        self.handler.shutdown().await;
     }
 
     /// 通知监听循环退出并释放端口
@@ -926,7 +942,7 @@ mod tests {
         let addr = socket.local_addr().unwrap();
 
         let shutdown_rx = server.shutdown.subscribe();
-        server.spawn_udp_loop(socket.clone(), shutdown_rx);
+        server.spawn_udp_loop(socket.clone(), shutdown_rx, server.query_permits.clone());
 
         let client = UdpSocket::bind("127.0.0.1:0")
             .await

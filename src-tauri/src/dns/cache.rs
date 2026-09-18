@@ -23,13 +23,19 @@ pub fn min_record_ttl(message: &Message) -> Option<u32> {
 /// 计算实际缓存时长
 ///
 /// 缓存寿命由权威服务器给出的 TTL 决定，配置项只作为上限，避免超长缓存。
+/// `cache_ttl` 设为 0 时表示不设上限，直接使用响应中的原始 TTL（使用果冻解析时建议保持为 0）。
 /// TTL 为 0 表示不可缓存（RFC 2181 §8）。
 pub fn effective_cache_ttl(message: &Message, cap: Duration) -> Option<Duration> {
     let ttl = min_record_ttl(message)?;
     if ttl == 0 {
         return None;
     }
-    Some(Duration::from_secs(u64::from(ttl)).min(cap))
+    if cap.is_zero() {
+        // cache_ttl = 0 表示无上限，完全信任权威服务器给出的 TTL
+        Some(Duration::from_secs(u64::from(ttl)))
+    } else {
+        Some(Duration::from_secs(u64::from(ttl)).min(cap))
+    }
 }
 
 /// 按驻留时间扣减响应中所有记录的 TTL
@@ -55,7 +61,11 @@ fn apply_elapsed_ttl(message: &mut Message, elapsed_secs: u32) {
 /// 若拿它去截断每条记录，会把 TTL 较长的记录（同响应里常见的 CDN CNAME）
 /// 一并压到最小值，下游因此过早丢弃仍然有效的记录并反复回查。
 /// 只按配置上限收敛：既保留各记录自身的权威 TTL，又避免超长 TTL 传下去。
+/// `cap_secs` 为 0 时表示不设上限，跳过截断（此时完全信任权威服务器的 TTL）。
 fn clamp_record_ttls(message: &mut Message, cap_secs: u32) {
+    if cap_secs == 0 {
+        return;
+    }
     let clamp = |records: &mut Vec<trust_dns_proto::rr::Record>| {
         for record in records.iter_mut() {
             if record.ttl() > cap_secs {

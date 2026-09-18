@@ -2,6 +2,7 @@ import { Link, useLocation } from "react-router-dom";
 import {
   LayoutDashboard,
   Settings,
+  SlidersHorizontal,
   ListFilter,
   FileText,
   Info,
@@ -17,6 +18,11 @@ const navItems = [
     title: "DNS 设置",
     icon: Settings,
     path: "/settings",
+  },
+  {
+    title: "应用设置",
+    icon: SlidersHorizontal,
+    path: "/app-settings",
   },
   {
     title: "规则管理",
@@ -48,7 +54,7 @@ export default function Sidebar() {
           </div>
           <div>
             <h1 className="font-bold text-lg">果冻网络加速</h1>
-            <p className="text-xs text-muted-foreground">v1.2.3</p>
+            <p className="text-xs text-muted-foreground">v1.2.4</p>
           </div>
         </div>
       </div>

@@ -1674,6 +1674,13 @@ impl DnsHandler {
         self.pool.cleanup_idle();
     }
 
+    /// 停止服务时释放上游连接及请求合并状态，避免定时重启累积旧运行态。
+    pub async fn shutdown(&self) {
+        self.pool.shutdown();
+        self.pending_queries.lock().await.clear();
+        self.cache.clear();
+    }
+
     /// 记录合并请求（请求合并命中）
     fn record_coalesced(&self, domain: &str, qtype: &str, start: Instant) {
         let mut stats = self.stats.lock().unwrap();

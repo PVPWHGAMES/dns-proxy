@@ -31,6 +31,12 @@ pub struct AppConfig {
     pub strategy: DnsStrategy,
     #[serde(default)]
     pub start_minimized: bool,
+    /// 登录后延迟启动 DNS 服务的秒数；0 表示立即启动。
+    #[serde(default)]
+    pub startup_delay_seconds: u64,
+    /// DNS 服务定时重启间隔（小时）；0 表示关闭定时重启。
+    #[serde(default)]
+    pub dns_restart_interval_hours: u64,
     #[serde(default = "default_server_groups")]
     pub server_groups: Vec<ServerGroup>,
     #[serde(default)]
@@ -96,6 +102,7 @@ pub struct ProxyConfig {
     pub listen_port: u16,
     pub protocol: String,
     pub cache_size: usize,
+    /// DNS 缓存 TTL（秒）；0 表示无上限、完全信任权威服务器返回的原始 TTL（使用果冻解析时建议保持为 0）
     pub cache_ttl: u64,
     pub block_ipv6: bool,
     /// 默认分组：未匹配任何规则时使用，空字符串表示使用所有服务器
@@ -232,7 +239,7 @@ impl Default for AppConfig {
                 listen_port: 53,
                 protocol: "both".to_string(),
                 cache_size: 1000,
-                cache_ttl: 300,
+                cache_ttl: 0,
                 block_ipv6: false,
                 default_group: "domestic".to_string(),
                 takeover_system_dns: true,
@@ -291,6 +298,8 @@ impl Default for AppConfig {
             },
             strategy: DnsStrategy::Fastest,
             start_minimized: false,
+            startup_delay_seconds: 0,
+            dns_restart_interval_hours: 0,
             ecs: EcsConfig::default(),
         }
     }
@@ -606,6 +615,23 @@ mod tests {
             !config.normalize(),
             "已无 geosite 订阅时不应再判定为改动，避免每次启动都重写配置文件"
         );
+    }
+
+    #[test]
+    fn app_behavior_defaults_are_safe_for_existing_configurations() {
+        let text = toml::to_string(&AppConfig::default()).expect("默认配置应可序列化");
+        let legacy_text = text
+            .lines()
+            .filter(|line| {
+                !line.trim_start().starts_with("startup_delay_seconds")
+                    && !line.trim_start().starts_with("dns_restart_interval_hours")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let config: AppConfig = toml::from_str(&legacy_text).expect("旧配置应能解析");
+        assert_eq!(config.startup_delay_seconds, 0);
+        assert_eq!(config.dns_restart_interval_hours, 0);
     }
 
     #[test]
