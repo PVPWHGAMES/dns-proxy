@@ -196,6 +196,7 @@ async fn save_app_settings(
 ) -> Result<(), String> {
     let mut config = lock_config(&state.config);
     config.start_minimized = new_config.start_minimized;
+    config.app_font = new_config.app_font;
     config.startup_delay_seconds = new_config.startup_delay_seconds;
     config.dns_restart_interval_hours = new_config.dns_restart_interval_hours;
     config.save().map_err(|error| error.to_string())

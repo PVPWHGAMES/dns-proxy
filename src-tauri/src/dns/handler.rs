@@ -150,6 +150,8 @@ pub struct QueryStats {
     pub total_queries: u64,
     pub blocked_queries: u64,
     pub cached_queries: u64,
+    /// 实际转发至上游且成功得到响应的查询数。
+    pub upstream_response_queries: u64,
     pub total_latency_ms: u64,
 }
 
@@ -200,8 +202,8 @@ pub struct TrafficStatsCollector {
     pub minute_buckets: BTreeMap<u32, (u64, u64, u64)>,
     // 域名计数
     pub domain_counts: HashMap<String, u64>,
-    // 延迟分布
-    pub latency_buckets: [u64; 6], // 0-10, 10-50, 50-100, 100-200, 200-500, 500+
+    // 延迟分布：DNS 上游响应通常不低于 40ms，重点细分 40-120ms 的常见区间。
+    pub latency_buckets: [u64; 6], // <=40, 41-60, 61-80, 81-120, 121-200, >200
     // 启动时间
     pub start_time: Option<Instant>,
 }
@@ -1336,6 +1338,7 @@ impl DnsHandler {
     ) {
         let mut stats = self.stats.lock().unwrap();
         stats.total_queries += 1;
+        stats.upstream_response_queries += 1;
         stats.total_latency_ms += latency;
 
         let mut counter = self.log_id_counter.lock().unwrap();
@@ -1453,11 +1456,10 @@ impl DnsHandler {
 
         self.push_log(log);
 
-        // 更新流量统计
+        // 缓存命中保留在请求趋势和域名统计中，但不代表上游响应，不能混入延迟分布。
         if let Ok(mut traffic) = self.traffic_stats.lock() {
             traffic.record_to_bucket(false, true);
             traffic.record_domain(domain);
-            traffic.record_latency(start.elapsed().as_millis() as u64);
         }
 
         // 缓存命中此前不写文件日志，排查时看起来像「查询没进来」
@@ -1531,8 +1533,8 @@ impl DnsHandler {
 
     pub fn get_stats(&self) -> (u64, u64, u64, f64) {
         let stats = self.stats.lock().unwrap();
-        let avg_latency = if stats.total_queries > 0 {
-            stats.total_latency_ms as f64 / stats.total_queries as f64
+        let avg_latency = if stats.upstream_response_queries > 0 {
+            stats.total_latency_ms as f64 / stats.upstream_response_queries as f64
         } else {
             0.0
         };
@@ -1618,12 +1620,12 @@ impl DnsHandler {
 
         // 构建延迟分布
         let latency_ranges = [
-            "0-10ms",
-            "10-50ms",
-            "50-100ms",
-            "100-200ms",
-            "200-500ms",
-            "500ms+",
+            "≤40ms",
+            "41-60ms",
+            "61-80ms",
+            "81-120ms",
+            "121-200ms",
+            ">200ms",
         ];
         let latency_dist: Vec<LatencyDistribution> = latency_ranges
             .iter()
@@ -1786,11 +1788,11 @@ impl TrafficStatsCollector {
     /// 记录延迟
     fn record_latency(&mut self, latency_ms: u64) {
         let bucket = match latency_ms {
-            0..=10 => 0,
-            11..=50 => 1,
-            51..=100 => 2,
-            101..=200 => 3,
-            201..=500 => 4,
+            0..=40 => 0,
+            41..=60 => 1,
+            61..=80 => 2,
+            81..=120 => 3,
+            121..=200 => 4,
             _ => 5,
         };
         self.latency_buckets[bucket] += 1;
@@ -1848,6 +1850,27 @@ mod tests {
         rx.recv_timeout(Duration::from_millis(250))
             .expect("缓存命中记录不应阻塞");
         assert_eq!(handler.get_stats().2, 1);
+    }
+
+    #[test]
+    fn latency_statistics_exclude_cached_and_blocked_queries() {
+        let handler = handler();
+        let start = Instant::now();
+
+        handler.record_success("upstream.example", "A", "1.1.1.1", "DNS", 40, "default");
+        handler.record_cached("cached.example", "A", "1.2.3.4", start);
+        handler.record_blocked("ads.example", "A", "blocklist", start);
+
+        let (_, _, _, avg_latency) = handler.get_stats();
+        assert_eq!(avg_latency, 40.0, "平均延迟只应使用上游成功响应");
+
+        let latency_count: u64 = handler
+            .get_traffic_stats()
+            .latency_dist
+            .iter()
+            .map(|bucket| bucket.count)
+            .sum();
+        assert_eq!(latency_count, 1, "延迟分布不应包含缓存或拦截查询");
     }
 
     #[test]
@@ -2101,11 +2124,11 @@ mod tests {
             "并列次数的域名必须按域名稳定排序"
         );
 
-        // 延迟分布：5ms 落 0-10ms 桶 3 次，120ms 落 100-200ms 桶 1 次
+        // 延迟分布：5ms 落 <=40ms 桶 3 次，120ms 落 81-120ms 桶 1 次。
         assert_eq!(stats.latency_dist.len(), 6, "延迟分布应有 6 个区间");
-        assert_eq!(stats.latency_dist[0].range, "0-10ms");
+        assert_eq!(stats.latency_dist[0].range, "≤40ms");
         assert_eq!(stats.latency_dist[0].count, 3);
-        assert_eq!(stats.latency_dist[3].range, "100-200ms");
+        assert_eq!(stats.latency_dist[3].range, "81-120ms");
         assert_eq!(stats.latency_dist[3].count, 1);
 
         assert_eq!(stats.total_queries, 5);

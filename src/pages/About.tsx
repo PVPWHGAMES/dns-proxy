@@ -102,7 +102,7 @@ export default function About() {
           </div>
         </div>
         <h1 className="text-2xl font-bold mb-1">果冻网络加速</h1>
-        <p className="text-muted-foreground mb-3">版本 1.2.4</p>
+        <p className="text-muted-foreground mb-3">版本 1.2.5</p>
 
         {/* 检查更新按钮 */}
         <div className="mt-6">

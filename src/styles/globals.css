@@ -2,6 +2,12 @@
 @tailwind components;
 @tailwind utilities;
 
+@font-face {
+  font-family: "汉仪旗黑65简";
+  src: url("/fonts/honkai-star-rail.ttf") format("truetype");
+  font-display: swap;
+}
+
 @layer base {
   :root {
     --background: 0 0% 100%;
@@ -24,6 +30,7 @@
     --input: 214.3 31.8% 91.4%;
     --ring: 221.2 83.2% 53.3%;
     --radius: 0.5rem;
+    --app-font: "Microsoft YaHei", "Microsoft YaHei UI", sans-serif;
   }
 
   .dark {
@@ -61,6 +68,30 @@
   }
   body {
     @apply bg-background text-foreground;
+    font-family: var(--app-font);
+    font-size: 14px;
+    line-height: 1.5;
+    font-synthesis: none;
+    font-kerning: normal;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* 中文界面需要更宽松的字间距，避免装饰字体笔画粘连。 */
+  html[data-app-font="汉仪旗黑65简"] body {
+    letter-spacing: 0.01em;
+  }
+
+  /* 日志、域名和延迟数值保持稳定的等宽字形，不受界面字体影响。 */
+  .font-mono {
+    font-family: "Cascadia Mono", "Consolas", "Microsoft YaHei UI", monospace;
+    font-variant-ligatures: none;
+    font-feature-settings: "tnum" 1;
+  }
+
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
   }
 }
 

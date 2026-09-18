@@ -377,7 +377,7 @@ export default function Dashboard() {
           value={`${stats.avg_latency.toFixed(1)}ms`}
           icon={Zap}
           color="yellow"
-          hint="分子只累加成功转向上游的查询耗时，分母是总查询数（含缓存命中、阻止等不计耗时的路径），因此数值偏低，可视为上游响应速度的下界。"
+          hint="仅统计实际转发至上游且成功得到响应的查询；缓存命中、广告/规则拦截、请求合并与失败查询均不计入。"
         />
         <StatCard
           title="缓存命中"
@@ -449,7 +449,7 @@ export default function Dashboard() {
         </ChartPanel>
 
         {/* 2. 响应延迟分布 */}
-        <ChartPanel title="响应延迟分布" icon={Zap}>
+        <ChartPanel title="响应延迟分布" icon={Zap} hint="仅上游成功响应 · 重点 40-120ms">
           {hasLatencyData ? (
             <ResponsiveContainer width="100%" height={CHART_HEIGHT}>
               <BarChart data={latencyDist}>

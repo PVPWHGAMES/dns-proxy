@@ -31,6 +31,9 @@ pub struct AppConfig {
     pub strategy: DnsStrategy,
     #[serde(default)]
     pub start_minimized: bool,
+    /// 应用界面字体；旧配置未设置时默认使用微软雅黑。
+    #[serde(default = "default_app_font")]
+    pub app_font: String,
     /// 登录后延迟启动 DNS 服务的秒数；0 表示立即启动。
     #[serde(default)]
     pub startup_delay_seconds: u64,
@@ -69,6 +72,10 @@ impl Default for EcsConfig {
             ipv6_source_mask: 56,
         }
     }
+}
+
+fn default_app_font() -> String {
+    "Microsoft YaHei".to_string()
 }
 
 fn default_ipv4_mask() -> u8 {
@@ -298,6 +305,7 @@ impl Default for AppConfig {
             },
             strategy: DnsStrategy::Fastest,
             start_minimized: false,
+            app_font: default_app_font(),
             startup_delay_seconds: 0,
             dns_restart_interval_hours: 0,
             ecs: EcsConfig::default(),

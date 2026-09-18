@@ -76,6 +76,8 @@ export interface AppConfig {
   subscription_update_interval: number;
   latency_test_interval: number;
   start_minimized: boolean;
+  /** 应用界面字体 */
+  app_font: string;
   /** 登录后延迟启动 DNS 服务的秒数，0 表示立即启动 */
   startup_delay_seconds: number;
   /** DNS 服务定时重启间隔（小时），0 表示禁用 */

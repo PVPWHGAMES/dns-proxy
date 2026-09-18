@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { Clock3, MonitorDown, Power, RefreshCw, Save, TimerReset } from "lucide-react";
+import { Clock3, MonitorDown, Palette, Power, RefreshCw, Save, TimerReset } from "lucide-react";
 import { api, AppConfig } from "../lib/api";
+import { applyAppFont, FONT_OPTIONS, normalizeAppFont } from "../lib/font";
 import MessageBanner from "../components/ui/MessageBanner";
 
 const MAX_STARTUP_DELAY_SECONDS = 3600;
@@ -20,7 +21,9 @@ export default function AppSettings() {
           api.getConfig(),
           api.isAutostartEnabled(),
         ]);
-        setConfig(loadedConfig);
+        const normalizedConfig = { ...loadedConfig, app_font: normalizeAppFont(loadedConfig.app_font) };
+        setConfig(normalizedConfig);
+        applyAppFont(normalizedConfig.app_font);
         setAutostartEnabled(enabled);
       } catch (error) {
         setMessage({ type: "error", text: "加载应用设置失败: " + error });
@@ -40,6 +43,12 @@ export default function AppSettings() {
     const parsed = Number.parseInt(rawValue, 10);
     const value = Number.isFinite(parsed) ? Math.min(Math.max(parsed, 0), max) : 0;
     setConfig({ ...config, [field]: value });
+  };
+
+  const handleFontChange = (font: string) => {
+    if (!config) return;
+    applyAppFont(font);
+    setConfig({ ...config, app_font: font });
   };
 
   const handleToggleAutostart = async () => {
@@ -131,6 +140,26 @@ export default function AppSettings() {
             />
             <p className="text-xs text-muted-foreground mt-1">0 表示立即启动，最长 3600 秒。用于等待网卡、VPN 或其他代理组件先就绪；仅下次启动应用生效。</p>
           </div>
+        </div>
+      </div>
+
+      <div className="bg-card rounded-xl border">
+        <div className="p-4 border-b flex items-center gap-2">
+          <Palette className="w-5 h-5 text-primary" />
+          <h3 className="font-semibold">界面显示</h3>
+        </div>
+        <div className="p-4 max-w-xl">
+          <label htmlFor="app-font" className="block text-sm font-medium mb-2">界面字体</label>
+          <select
+            id="app-font"
+            value={config.app_font}
+            onChange={(event) => handleFontChange(event.target.value)}
+            className="w-full max-w-sm px-3 py-2 border rounded-lg bg-background"
+          >
+            {FONT_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
         </div>
       </div>
 
